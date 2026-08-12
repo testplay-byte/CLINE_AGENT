@@ -81,7 +81,7 @@ jobs:
         shell: bash
 
       - name: Compile Electron TypeScript
-        run: npx tsc -p electron/tsconfig.json
+        run: npx -p typescript tsc -p electron/tsconfig.json
         shell: bash
 
       - name: Verify Electron build output
@@ -132,7 +132,7 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
       - name: Checkout code
