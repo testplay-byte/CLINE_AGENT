@@ -111,10 +111,10 @@
           "arch": ["x64"]
         }
       ],
-      "icon": "electron/resources/icon.png",
-      "artifactName": "${productName}-${version}-${target}.${ext}"
+      "icon": "electron/resources/icon.png"
     },
     "nsis": {
+      "artifactName": "${productName}-Setup-${version}.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
