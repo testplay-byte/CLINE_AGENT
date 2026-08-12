@@ -138,27 +138,18 @@ export function SettingsView() {
   const toggleDark = useDashboardStore((s) => s.toggleDark);
 
   // Local state for config
-  const [config, setConfig] = useState<AiConfig>(DEFAULT_CONFIG);
+  const [config, setConfig] = useState<AiConfig>(() => {
+    if (typeof window === 'undefined') return DEFAULT_CONFIG;
+    return loadConfig();
+  });
   const [showApiKey, setShowApiKey] = useState(false);
   const [providerOpen, setProviderOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const providerRef = useRef<HTMLDivElement>(null);
   const modelRef = useRef<HTMLDivElement>(null);
 
-  // Load config from localStorage on mount
-  useEffect(() => {
-    const stored = loadConfig();
-    setConfig(stored);
-  }, []);
-
-  // Sync theme from store to config (on mount)
-  useEffect(() => {
-    setConfig((prev) => ({
-      ...prev,
-      themeId: storeThemeId,
-      isDark: storeIsDark,
-    }));
-  }, []);
+  // Sync theme from store to config (derived state)
+  const syncedConfig = { ...config, themeId: storeThemeId, isDark: storeIsDark };
 
   // Close dropdowns on outside click
   useEffect(() => {

@@ -492,13 +492,14 @@ function AddModelForm({ onClose }: { onClose: () => void }) {
 // ============================================================
 export function ModelsView() {
   const { isDark, card, text, muted, accent, accentFaded, border } = useTheme();
-  const [config, setConfig] = useState<AiConfig>(DEFAULT_CONFIG);
+  const [config, setConfig] = useState<AiConfig>(() => {
+    if (typeof window === 'undefined') return DEFAULT_CONFIG;
+    return loadConfig();
+  });
   const [showAddForm, setShowAddForm] = useState(false);
 
-  // Load config on mount
+  // Listen for storage changes (e.g. from Settings view)
   useEffect(() => {
-    setConfig(loadConfig());
-    // Listen for storage changes (e.g. from Settings view)
     const handler = () => setConfig(loadConfig());
     window.addEventListener('storage', handler);
     return () => window.removeEventListener('storage', handler);

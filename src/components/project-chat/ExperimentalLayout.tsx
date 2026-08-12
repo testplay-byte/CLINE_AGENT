@@ -9,7 +9,6 @@ import {
   useProjectChatStore,
   type FreeformPanel,
   MODEL_OPTIONS,
-  MOCK_CODE,
 } from '@/lib/project-chat-store';
 import { ExplorerPanel } from './panels/ExplorerPanel';
 import { TodoPanel } from './panels/TodoPanel';
@@ -22,7 +21,8 @@ const TITLE_BAR_H = 40;
 // ============================================================
 function SimpleCodeView() {
   const { text, muted, inputBg, isDark, bg, card, border } = useTheme();
-  const lines = MOCK_CODE.split('\n');
+  const code = useProjectChatStore((s) => s.code);
+  const lines = code ? code.split('\n') : ['// No file selected'];
   const keywords = ['import', 'export', 'from', 'const', 'let', 'var', 'function', 'return', 'async', 'await', 'if', 'else', 'new', 'typeof', 'interface', 'type', 'extends'];
   const types = ['string', 'number', 'boolean', 'void', 'NextRequest', 'NextResponse', 'RateLimiter', 'AuthGuard'];
   const scrollRef = useRef<HTMLDivElement>(null);
