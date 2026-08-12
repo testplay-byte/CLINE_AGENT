@@ -43,6 +43,26 @@ export const DASHBOARD_THEMES: DashboardTheme[] = [
     hoverDark: '#2E2E30',
   },
   {
+    id: 'midnight',
+    name: 'Midnight Lab',
+    accent: '#D6FF57',
+    accent2: '#B8F02A',
+    bgLight: '#F2F3E8',
+    bgDark: '#1A1A1C',
+    cardLight: '#FFFFFF',
+    cardDark: '#242426',
+    textLight: '#121214',
+    textDark: '#F2F3E8',
+    borderLight: '#DDE0CC',
+    borderDark: '#363638',
+    mutedLight: '#6B7A5A',
+    mutedDark: '#8A8A78',
+    inputBgLight: '#EAEBE0',
+    inputBgDark: '#2C2C2E',
+    hoverLight: '#E8E9DE',
+    hoverDark: '#2E2E30',
+  },
+  {
     id: 'bento',
     name: 'Bento Blue',
     accent: '#6366F1',
@@ -61,6 +81,46 @@ export const DASHBOARD_THEMES: DashboardTheme[] = [
     inputBgDark: '#181B2A',
     hoverLight: '#E0E7FF',
     hoverDark: '#22253A',
+  },
+  {
+    id: 'sunset',
+    name: 'Sunset Pop',
+    accent: '#FF7A3D',
+    accent2: '#FFB88A',
+    bgLight: '#FFF0E6',
+    bgDark: '#1A1A1C',
+    cardLight: '#FFFFFF',
+    cardDark: '#242426',
+    textLight: '#121214',
+    textDark: '#FFF0E6',
+    borderLight: '#FFD0B5',
+    borderDark: '#363638',
+    mutedLight: '#8A7A68',
+    mutedDark: '#8A8A88',
+    inputBgLight: '#FFE8DA',
+    inputBgDark: '#2C2C2E',
+    hoverLight: '#FFE0CC',
+    hoverDark: '#2E2E30',
+  },
+  {
+    id: 'mono',
+    name: 'Mono Stone',
+    accent: '#111111',
+    accent2: '#A0A0A0',
+    bgLight: '#F5F5F0',
+    bgDark: '#1A1A1C',
+    cardLight: '#FFFFFF',
+    cardDark: '#242426',
+    textLight: '#111111',
+    textDark: '#F5F5F0',
+    borderLight: '#D5D5D0',
+    borderDark: '#363638',
+    mutedLight: '#8A8A80',
+    mutedDark: '#8A8A88',
+    inputBgLight: '#EEEEEA',
+    inputBgDark: '#2C2C2E',
+    hoverLight: '#E8E8E4',
+    hoverDark: '#2E2E30',
   },
 ];
 
@@ -155,6 +215,7 @@ interface DashboardState {
   searchQuery: string;
   searchOpen: boolean;
   sidebarOpen: boolean;
+  currentView: 'home' | 'settings' | 'history' | 'models';
 
   toggleDark: () => void;
   setTheme: (id: string) => void;
@@ -168,6 +229,7 @@ interface DashboardState {
   deleteProject: (id: string) => void;
   setSidebarOpen: (open: boolean) => void;
   toggleSidebar: () => void;
+  setCurrentView: (view: 'home' | 'settings' | 'history' | 'models') => void;
 }
 
 export const useDashboardStore = create<DashboardState>((set) => ({
@@ -179,6 +241,7 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   searchQuery: '',
   searchOpen: false,
   sidebarOpen: false,
+  currentView: 'home',
 
   toggleDark: () => set((s) => ({ isDark: !s.isDark })),
   setTheme: (id) => set({ themeId: id }),
@@ -223,4 +286,5 @@ export const useDashboardStore = create<DashboardState>((set) => ({
     }),
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
+  setCurrentView: (view) => set({ currentView: view, selectedProjectId: view === 'home' ? null : undefined }),
 }));

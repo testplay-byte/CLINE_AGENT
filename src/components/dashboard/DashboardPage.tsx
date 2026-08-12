@@ -8,12 +8,16 @@ import { TopBar } from './TopBar';
 import { DesktopSidebar, MobileSidebar } from './Sidebar';
 import { WelcomeView } from './WelcomeView';
 import { ProjectChatView } from '@/components/project-chat';
+import { SettingsView } from './SettingsView';
+import { HistoryView } from './HistoryView';
+import { ModelsView } from './ModelsView';
 
 // ============================================================
 // MAIN DASHBOARD PAGE
 // ============================================================
 export function DashboardPage() {
   const selectedProjectId = useDashboardStore((s) => s.selectedProjectId);
+  const currentView = useDashboardStore((s) => s.currentView);
   const { isDark, bg, text, accent, border, card } = useTheme();
 
   // When a project is selected, show the full chat view
@@ -59,7 +63,7 @@ export function DashboardPage() {
           }}
         />
 
-        {/* Ambient glow blobs (very faded) */}
+        {/* Ambient glow blobs */}
         <div
           className="absolute -top-32 -right-32 w-[350px] h-[350px] rounded-full blur-[100px] pointer-events-none"
           style={{ background: accent, opacity: isDark ? 0.04 : 0.06, transition: 'opacity 0.35s ease' }}
@@ -75,7 +79,10 @@ export function DashboardPage() {
         <div className="relative z-10 flex-1 min-h-0 flex gap-3 p-3 md:p-4">
           <DesktopSidebar />
           <AnimatePresence mode="wait">
-            <WelcomeView />
+            {currentView === 'home' && <WelcomeView key="home" />}
+            {currentView === 'settings' && <SettingsView key="settings" />}
+            {currentView === 'history' && <HistoryView key="history" />}
+            {currentView === 'models' && <ModelsView key="models" />}
           </AnimatePresence>
         </div>
       </div>

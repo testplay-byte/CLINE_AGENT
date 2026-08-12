@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import {
-  Settings, Plus, LayoutDashboard, Trash2,
+  Settings, Plus, LayoutDashboard, Trash2, History, Cpu,
 } from 'lucide-react';
 import { useDashboardStore, type Project } from '@/lib/dashboard-store';
 import { useTheme, bdr, staggerContainer, staggerItem, ease } from '@/lib/dashboard-helpers';
@@ -136,34 +136,55 @@ function AddProjectButton() {
 // ============================================================
 export function SidebarContent({ onMobileSelect }: { onMobileSelect?: () => void }) {
   const selectedProjectId = useDashboardStore((s) => s.selectedProjectId);
+  const currentView = useDashboardStore((s) => s.currentView);
   const projects = useDashboardStore((s) => s.projects);
   const selectProject = useDashboardStore((s) => s.selectProject);
   const deleteProject = useDashboardStore((s) => s.deleteProject);
   const goHome = useDashboardStore((s) => s.goHome);
+  const setCurrentView = useDashboardStore((s) => s.setCurrentView);
   const { isDark, text, muted, accent, border } = useTheme();
+
+  const navBtn = (view: 'home' | 'settings' | 'history' | 'models', icon: React.ReactNode, label: string) => {
+    const isActive = currentView === view && view !== 'home' ? true : view === 'home' && currentView === 'home' && !selectedProjectId;
+    return (
+      <button
+        onClick={() => { setCurrentView(view); onMobileSelect?.(); }}
+        className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg transition-colors duration-200 cursor-pointer"
+        style={{
+          backgroundColor: isActive ? accent + '15' : 'transparent',
+          border: bdr('1.5px', isActive ? accent + '30' : 'transparent'),
+          color: isActive ? accent : muted,
+        }}
+        onMouseEnter={(e) => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.backgroundColor = isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.025)'; }}
+        onMouseLeave={(e) => { if (!isActive) (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'transparent'; }}
+      >
+        {icon}
+        <span className="text-[12px] font-medium">{label}</span>
+      </button>
+    );
+  };
 
   return (
     <>
       <div className="px-3 pt-3 pb-2 flex items-center gap-2">
+        {navBtn('home', <LayoutDashboard size={14} />, 'Home')}
+        <div className="flex-1" />
         <TooltipProvider delayDuration={300}>
           <Tooltip>
             <TooltipTrigger asChild>
-              <button
-                onClick={() => { goHome(); onMobileSelect?.(); }}
-                className="w-7 h-7 rounded-lg flex items-center justify-center transition-all duration-200 cursor-pointer hover:scale-105 active:scale-95"
-                style={{
-                  backgroundColor: selectedProjectId === null ? accent + '15' : 'transparent',
-                  border: bdr('1.5px', selectedProjectId === null ? accent + '30' : 'transparent'),
-                  color: selectedProjectId === null ? accent : muted,
-                }}
-              >
-                <LayoutDashboard size={14} />
-              </button>
+              {navBtn('history', <History size={14} />, 'History')}
             </TooltipTrigger>
-            <TooltipContent side="right"><p className="text-xs">Overview</p></TooltipContent>
+            <TooltipContent side="right"><p className="text-xs">Session History</p></TooltipContent>
           </Tooltip>
         </TooltipProvider>
-        <h2 className="text-[12px] font-bold flex-1" style={{ color: text }}>Projects</h2>
+        <TooltipProvider delayDuration={300}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              {navBtn('models', <Cpu size={14} />, 'Models')}
+            </TooltipTrigger>
+            <TooltipContent side="right"><p className="text-xs">Model Management</p></TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       </div>
       <Separator className="mx-3" style={{ backgroundColor: border }} />
 
@@ -171,6 +192,9 @@ export function SidebarContent({ onMobileSelect }: { onMobileSelect?: () => void
         variants={staggerContainer} initial="initial" animate="animate"
         className="flex-1 overflow-y-auto p-1.5 custom-scrollbar flex flex-col gap-0.5"
       >
+        <div className="px-2.5 pb-1 pt-2">
+          <h2 className="text-[12px] font-bold" style={{ color: text }}>Projects</h2>
+        </div>
         {projects.map((p) => (
           <ProjectItem
             key={p.id} project={p} isActive={p.id === selectedProjectId}
@@ -185,22 +209,7 @@ export function SidebarContent({ onMobileSelect }: { onMobileSelect?: () => void
       </div>
 
       <div style={{ borderTop: bdr('1.5px', border) }} className="p-2">
-        <TooltipProvider delayDuration={300}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg transition-colors duration-200 cursor-pointer"
-                style={{ color: muted }}
-                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.backgroundColor = isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.025)'; }}
-                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'transparent'; }}
-              >
-                <Settings size={14} />
-                <span className="text-[12px] font-medium">Settings</span>
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right"><p className="text-xs">Settings (coming soon)</p></TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+        {navBtn('settings', <Settings size={14} />, 'Settings')}
       </div>
     </>
   );

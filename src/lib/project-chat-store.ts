@@ -1,6 +1,8 @@
 'use client';
 
 import { create } from 'zustand';
+import { sendToAI, demoResponse } from './ai-service';
+import type { AIConfig } from './ai-service';
 
 // ============================================================
 // TYPES
@@ -301,13 +303,15 @@ export const useProjectChatStore = create<ProjectChatState>((set, get) => ({
   messages: MOCK_MESSAGES,
   inputMessage: '',
   setInputMessage: (msg) => set({ inputMessage: msg }),
-  sendMessage: () => {
-    const { inputMessage, messages, selectedModelId } = get();
+  sendMessage: async () => {
+    const { inputMessage, messages } = get();
     if (!inputMessage.trim()) return;
+    const trimmed = inputMessage.trim();
+
     const userMsg: ChatMessage = {
       id: `m${Date.now()}`,
       type: 'user',
-      content: inputMessage.trim(),
+      content: trimmed,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
     set({
@@ -315,18 +319,118 @@ export const useProjectChatStore = create<ProjectChatState>((set, get) => ({
       inputMessage: '',
       showSuggestion: false,
     });
-    // Simulate agent thinking
+
+    // Start agent thinking
     set({ isAgentThinking: true, agentStatus: 'Processing your request' });
-    setTimeout(() => {
+
+    try {
+      // Load AI config from localStorage (set during onboarding)
+      const raw = localStorage.getItem('acute-agent-config');
+      let aiConfig: AIConfig | null = null;
+      let isDemo = false;
+
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed.apiKey && parsed.apiKey.length > 6 && parsed.modelId !== 'demo') {
+            aiConfig = {
+              providerId: parsed.providerId || 'openai',
+              baseUrl: parsed.baseUrl || 'https://api.openai.com/v1',
+              apiKey: parsed.apiKey,
+              modelId: parsed.modelId,
+              maxOutput: parsed.maxOutput || 8192,
+              temperature: parsed.temperature || 0.7,
+              contextWindow: parsed.contextWindow || 100000,
+            };
+          } else {
+            isDemo = true;
+          }
+        } catch {
+          isDemo = true;
+        }
+      } else {
+        isDemo = true;
+      }
+
+      // Update status based on mode
+      set({
+        agentStatus: isDemo ? 'Demo mode active' : `Calling ${aiConfig?.modelId || 'model'}...`,
+      });
+
+      let result;
+      if (isDemo || !aiConfig) {
+        result = await demoResponse(trimmed);
+      } else {
+        // Add a "thinking" message
+        set({
+          messages: [...get().messages, {
+            id: `t${Date.now()}`,
+            type: 'thought',
+            content: `Analyzing your request and preparing response...`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          }],
+          agentStatus: 'Generating response',
+        });
+        result = await sendToAI(aiConfig, get().messages);
+      }
+
+      // Stop thinking and add response
       set({ isAgentThinking: false, agentStatus: '' });
-      const aiResponse: ChatMessage = {
+
+      const responseMsgs: ChatMessage[] = [];
+
+      if (result.thoughts) {
+        // Already added during AI call for real mode; add for demo
+        if (isDemo) {
+          responseMsgs.push({
+            id: `t${Date.now()}`,
+            type: 'thought',
+            content: result.thoughts,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          });
+        }
+      }
+
+      responseMsgs.push({
         id: `m${Date.now() + 1}`,
         type: 'ai',
-        content: "I'll look into that. Let me analyze the codebase and get back to you with a detailed plan.",
+        content: result.text,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      };
-      set({ messages: [...get().messages, aiResponse] });
-    }, 2000);
+      });
+
+      if (result.actions) {
+        responseMsgs.push({
+          id: `a${Date.now() + 2}`,
+          type: 'actions',
+          content: '',
+          actions: result.actions,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        });
+      }
+
+      if (result.diff) {
+        responseMsgs.push({
+          id: `d${Date.now() + 3}`,
+          type: 'diff',
+          content: '',
+          diff: result.diff,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        });
+      }
+
+      set({ messages: [...get().messages, ...responseMsgs] });
+    } catch (error) {
+      set({ isAgentThinking: false, agentStatus: '' });
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error occurred';
+      set({
+        messages: [...get().messages, {
+          id: `e${Date.now()}`,
+          type: 'ai',
+          content: `**Error:** ${errorMsg}\n\nPlease check your API key and model configuration in **Settings → Model**.`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        }],
+      });
+    }
   },
   showSuggestion: true,
   dismissSuggestion: () => set({ showSuggestion: false }),

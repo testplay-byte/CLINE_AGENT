@@ -11,6 +11,33 @@ export default function AllSetScreen() {
   const modelId = useOnboardingStore((st) => st.modelId);
   const brainChoice = useOnboardingStore((st) => st.brainChoice);
   const setStep = useOnboardingStore((st) => st.setStep);
+  const setCompleted = useOnboardingStore((st) => st.setCompleted);
+  const apiKey = useOnboardingStore((st) => st.apiKey);
+  const baseUrl = useOnboardingStore((st) => st.baseUrl);
+  const themeId = useOnboardingStore((st) => st.themeId);
+  const isDark = useOnboardingStore((st) => st.isDark);
+  const contextWindow = useOnboardingStore((st) => st.contextWindow);
+  const maxOutput = useOnboardingStore((st) => st.maxOutput);
+  const temperature = useOnboardingStore((st) => st.temperature);
+
+  const handleLaunch = () => {
+    // Persist onboarding config to localStorage for dashboard/chat stores
+    const config = {
+      themeId,
+      isDark,
+      providerId,
+      baseUrl,
+      apiKey,
+      modelId: brainChoice === 'later' ? 'demo' : modelId,
+      brainChoice,
+      contextWindow,
+      maxOutput,
+      temperature,
+    };
+    localStorage.setItem('acute-agent-config', JSON.stringify(config));
+    localStorage.setItem('acute-agent-onboarding-done', 'true');
+    setCompleted();
+  };
 
   const provider = PROVIDERS.find((p) => p.id === providerId);
   const isDemo = brainChoice === 'later';
@@ -255,6 +282,7 @@ export default function AllSetScreen() {
         <div className="mt-8 flex flex-col md:flex-row items-center justify-center gap-3">
           {/* Primary button */}
           <button
+            onClick={handleLaunch}
             className="group relative h-[58px] px-8 rounded-full font-bold text-[16px] flex items-center gap-3 border-[1.5px] overflow-hidden hover:scale-[1.02] active:scale-[0.98] transition-transform cursor-pointer"
             style={{
               background: s.accent,

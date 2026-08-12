@@ -1,7 +1,10 @@
 'use client';
 
+import { useEffect, useRef } from 'react';
 import { useOnboardingStore } from '@/lib/onboarding-store';
 import { useThemeStyles } from '@/lib/use-theme-styles';
+import { useDashboardStore } from '@/lib/dashboard-store';
+import { useProjectChatStore } from '@/lib/project-chat-store';
 import { DashboardPage } from '@/components/dashboard';
 import OnboardingHeader from '@/components/onboarding/Header';
 import OnboardingFooter from '@/components/onboarding/Footer';
@@ -81,6 +84,47 @@ function OnboardingFlow() {
 
 export default function Page() {
   const completed = useOnboardingStore((s) => s.completed);
+  const setCompleted = useOnboardingStore((s) => s.setCompleted);
+  const hydrated = useRef(false);
+
+  // Hydrate from localStorage on mount
+  useEffect(() => {
+    if (hydrated.current) return;
+    hydrated.current = true;
+
+    // Check if onboarding was previously completed
+    const wasCompleted = localStorage.getItem('acute-agent-onboarding-done');
+    if (wasCompleted === 'true') {
+      // Restore config and mark completed
+      const raw = localStorage.getItem('acute-agent-config');
+      if (raw) {
+        try {
+          const config = JSON.parse(raw);
+          // Sync to onboarding store
+          const store = useOnboardingStore.getState();
+          if (config.themeId) store.setTheme(config.themeId);
+          if (config.providerId) store.setProvider(config.providerId);
+          if (config.baseUrl) store.setBaseUrl(config.baseUrl);
+          if (config.apiKey) store.setApiKey(config.apiKey);
+          if (config.modelId && config.modelId !== 'demo') store.setModelId(config.modelId);
+
+          // Sync to dashboard store
+          const dash = useDashboardStore.getState();
+          dash.setTheme(config.themeId || 'nova');
+          if (config.isDark && !dash.isDark) dash.toggleDark();
+
+          // Sync to project chat store
+          const chat = useProjectChatStore.getState();
+          if (config.modelId && config.modelId !== 'demo') {
+            chat.setSelectedModelId(config.modelId);
+          }
+        } catch (e) {
+          console.warn('Failed to parse stored config:', e);
+        }
+      }
+      setCompleted();
+    }
+  }, [setCompleted]);
 
   if (!completed) {
     return <OnboardingFlow />;

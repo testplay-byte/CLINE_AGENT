@@ -9,3 +9,6 @@ export { RecentActivity } from './RecentActivity';
 export { WelcomeView } from './WelcomeView';
 export { SessionCard } from './SessionCard';
 export { SessionsView } from './SessionsView';
+export { SettingsView } from './SettingsView';
+export { HistoryView } from './HistoryView';
+export { ModelsView } from './ModelsView';
