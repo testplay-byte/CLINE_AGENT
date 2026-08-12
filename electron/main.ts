@@ -165,16 +165,16 @@ async function startServer(): Promise<number> {
 // CREATE MAIN WINDOW
 // ============================================================
 function createWindow(port: number) {
+  const iconPath = isDev
+    ? join(process.cwd(), 'electron', 'resources', 'icon.png')
+    : join(process.resourcesPath, 'icon.png');
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 900,
     minHeight: 600,
     title: 'ACUTE AGENT',
-    // Icon path: in dev use source dir, in prod use resources
-    const iconPath = isDev
-      ? join(process.cwd(), 'electron', 'resources', 'icon.png')
-      : join(process.resourcesPath, 'icon.png');
     icon: iconPath,
     backgroundColor: '#FFFBF0',
     show: false, // Show after ready-to-show to avoid flash
