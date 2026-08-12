@@ -100,12 +100,20 @@ Work Log:
 - Updated next.config.ts: unoptimized images for Electron, allowedDevOrigins, optimizePackageImports
 - Updated .gitignore: added release/, dist/electron/, upload/, tool-results/, screenshots
 - Added prepare-build.sh helper script
+- Fixed Windows icon.ico missing → use .png for all platforms (electron-builder auto-converts)
+- Fixed syntax error: const declaration inside object literal
+- Optimized release workflow: only upload installer files (.exe, .dmg, .AppImage), not runtime libs
+- Deleted old release with 190 unnecessary files
 
 Stage Summary:
 - Electron desktop packaging fully configured
-- GitHub Actions CI/CD pipeline running (3 build runs)
-- Build #3 results: ✅ Linux AppImage, ✅ macOS DMG, ❌ Windows (wrong tsc package)
-- Build #4 in progress with Windows fix
-- Release workflow creates GitHub releases with all platform installers
+- GitHub Actions CI/CD pipeline — 6 build runs to stabilize
+- **Build #6 FINAL RESULTS: ✅ Windows .exe, ✅ macOS .dmg, ✅ Linux .AppImage**
+- GitHub Release: https://github.com/testplay-byte/CLINE_AGENT/releases/tag/v2026.08.12-61394f0
+- Downloadable installers:
+  - Windows: ACUTE.AGENT-Setup-1.0.0.exe (222 MB)
+  - macOS: ACUTE.AGENT-1.0.0-arm64.dmg (299 MB)
+  - Linux: ACUTE.AGENT-1.0.0.AppImage (358 MB)
 - NTFY notifications sent on build status changes
 - All code pushed to testplay-byte/CLINE_AGENT
+- CI/CD pipeline now stable — future pushes will auto-build all 3 platforms
