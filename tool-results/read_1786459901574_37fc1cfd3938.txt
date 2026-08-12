@@ -1,0 +1,1367 @@
+    80→                        ? { maxOutputTokens: request.maxTokens }
+    81→                        : {}),
+    82→                temperature: request.temperature,
+    83→                ...(reasoning ? { reasoning } : {}),
+    84→        };
+    85→}
+    86→
+    87→function buildAiSdkRequestMessages(
+    88→        request: GatewayStreamRequest,
+    89→        context: GatewayProviderContext,
+    90→        systemPrompt?: string,
+    91→) {
+    92→        const aiMessages = toAiSdkMessages(request.messages, systemPrompt, {
+    93→                includeReasoning: shouldIncludeReasoningHistory(request, context),
+    94→                supportsImages: modelSupportsImageInput(context),
+    95→        }) as Array<Record<string, unknown>>;
+    96→
+    97→        if (shouldApplyBedrockCachePoint(request, context)) {
+    98→                applyBedrockCachePointToLastUserMessage(aiMessages);
+    99→                return aiMessages;
+   100→        }
+   101→
+   102→        if (!shouldApplyPromptCache(request, context)) {
+   103→                return aiMessages;
+   104→        }
+   105→
+   106→        const includeAnthropic = isAnthropicCompatibleModel({
+   107→                modelId: request.modelId,
+   108→                family: resolveModelFamily(context),
+   109→        });
+   110→
+   111→        for (let i = aiMessages.length - 1; i >= 0; i--) {
+   112→                if (aiMessages[i]?.role === "user") {
+   113→                        applyPromptCacheToLastTextPart(
+   114→                                aiMessages[i],
+   115→                                request.providerId,
+   116→                                includeAnthropic,
+   117→                        );
+   118→                        break;
+   119→                }
+   120→        }
+   121→
+   122→        return aiMessages;
+   123→}
+   124→
+   125→function resolveStickySession(
+   126→        request: GatewayStreamRequest,
+   127→        context: GatewayProviderContext,
+   128→):
+   129→        | {
+   130→                        transport: "json-body" | "header";
+   131→                        field: string;
+   132→                        value: string;
+   133→          }
+   134→        | undefined {
+   135→        const stickySession = context.provider.metadata?.stickySession;
+   136→        if (!stickySession) {
+   137→                return undefined;
+   138→        }
+   139→        const metadata = request.metadata;
+   140→        const value =
+   141→                metadata && typeof metadata === "object"
+   142→                        ? metadata[stickySession.metadataKey]
+   143→                        : undefined;
+   144→        if (typeof value !== "string") {
+   145→                return undefined;
+   146→        }
+   147→        const trimmed = value.trim();
+   148→        if (!trimmed) {
+   149→                return undefined;
+   150→        }
+   151→        return {
+   152→                transport: stickySession.transport,
+   153→                field: stickySession.field,
+   154→                value: trimmed,
+   155→        };
+   156→}
+   157→
+   158→type FetchBodyText =
+   159→        | { source: "init-body"; text: string }
+   160→        | { request: Request; source: "request"; text: string };
+   161→
+   162→async function bodyTextFromFetchInput(
+   163→        input: Parameters<typeof fetch>[0],
+   164→        init: Parameters<typeof fetch>[1],
+   165→): Promise<FetchBodyText | undefined> {
+   166→        const body = init?.body;
+   167→        if (body === null) {
+   168→                return undefined;
+   169→        }
+   170→        if (typeof body === "string") {
+   171→                return { source: "init-body", text: body };
+   172→        }
+   173→        if (body instanceof URLSearchParams) {
+   174→                return { source: "init-body", text: body.toString() };
+   175→        }
+   176→        if (body instanceof ArrayBuffer) {
+   177→                return { source: "init-body", text: Buffer.from(body).toString("utf8") };
+   178→        }
+   179→        if (ArrayBuffer.isView(body)) {
+   180→                return {
+   181→                        source: "init-body",
+   182→                        text: Buffer.from(body.buffer, body.byteOffset, body.byteLength).toString(
+   183→                                "utf8",
+   184→                        ),
+   185→                };
+   186→        }
+   187→        if (body !== undefined) {
+   188→                return undefined;
+   189→        }
+   190→        if (input instanceof Request) {
+   191→                try {
+   192→                        return {
+   193→                                request: input,
+   194→                                source: "request",
+   195→                                text: await input.clone().text(),
+   196→                        };
+   197→                } catch {
+   198→                        return undefined;
+   199→                }
+   200→        }
+   201→        return undefined;
+   202→}
+   203→
+   204→async function injectJsonBodyStickySession(
+   205→        input: Parameters<typeof fetch>[0],
+   206→        init: Parameters<typeof fetch>[1],
+   207→        stickySession: { field: string; value: string },
+   208→): Promise<Parameters<typeof fetch>> {
+   209→        const bodyText = await bodyTextFromFetchInput(input, init);
+   210→        if (!bodyText?.text.trim().startsWith("{")) {
+   211→                return [input, init];
+   212→        }
+   213→        let parsed: unknown;
+   214→        try {
+   215→                parsed = JSON.parse(bodyText.text);
+   216→        } catch {
+   217→                return [input, init];
+   218→        }
+   219→        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+   220→                return [input, init];
+   221→        }
+   222→        const body = parsed as Record<string, unknown>;
+   223→        const existingValue = body[stickySession.field];
+   224→        if (typeof existingValue !== "string" || !existingValue.trim()) {
+   225→                body[stickySession.field] = stickySession.value;
+   226→        }
+   227→        const nextBody = JSON.stringify(body);
+   228→        if (bodyText.source === "init-body") {
+   229→                return [input, { ...init, body: nextBody }];
+   230→        }
+   231→        return [new Request(bodyText.request, { body: nextBody }), init];
+   232→}
+   233→
+   234→function injectHeaderStickySession(
+   235→        input: Parameters<typeof fetch>[0],
+   236→        init: Parameters<typeof fetch>[1],
+   237→        stickySession: { field: string; value: string },
+   238→): Parameters<typeof fetch> {
+   239→        const headers = new Headers(
+   240→                input instanceof Request ? input.headers : undefined,
+   241→        );
+   242→        new Headers(init?.headers).forEach((value, key) => {
+   243→                headers.set(key, value);
+   244→        });
+   245→        if (!headers.get(stickySession.field)?.trim()) {
+   246→                headers.set(stickySession.field, stickySession.value);
+   247→        }
+   248→        return [input, { ...init, headers }];
+   249→}
+   250→
+   251→function wrapFetchForStickySession(
+   252→        baseFetch: typeof fetch | undefined,
+   253→        request: GatewayStreamRequest,
+   254→        context: GatewayProviderContext,
+   255→): typeof fetch | undefined {
+   256→        const stickySession = resolveStickySession(request, context);
+   257→        if (!stickySession) {
+   258→                return baseFetch;
+   259→        }
+   260→        const delegate = baseFetch ?? globalThis.fetch;
+   261→        if (!delegate) {
+   262→                return baseFetch;
+   263→        }
+   264→        const sessionFetch = (async (input, init) => {
+   265→                const [nextInput, nextInit] =
+   266→                        stickySession.transport === "json-body"
+   267→                                ? await injectJsonBodyStickySession(input, init, stickySession)
+   268→                                : injectHeaderStickySession(input, init, stickySession);
+   269→                return delegate(nextInput, nextInit);
+   270→        }) as typeof fetch;
+   271→        const delegateWithPreconnect = delegate as typeof fetch & {
+   272→                preconnect?: (...args: unknown[]) => unknown;
+   273→        };
+   274→        if (typeof delegateWithPreconnect.preconnect === "function") {
+   275→                (
+   276→                        sessionFetch as typeof fetch & {
+   277→                                preconnect?: (...args: unknown[]) => unknown;
+   278→                        }
+   279→                ).preconnect = delegateWithPreconnect.preconnect.bind(delegate);
+   280→        }
+   281→        return sessionFetch;
+   282→}
+   283→
+   284→function shouldIncludeReasoningHistory(
+   285→        request: GatewayStreamRequest,
+   286→        context: GatewayProviderContext,
+   287→): boolean {
+   288→        return !isCerebrasProvider(request, context);
+   289→}
+   290→
+   291→async function ensureGatewayLangfuseTelemetry(
+   292→        providerId: string,
+   293→): Promise<boolean> {
+   294→        try {
+   295→                const runtime = await import("../services/langfuse-telemetry");
+   296→                return runtime.ensureLangfuseTelemetry(providerId);
+   297→        } catch {
+   298→                return false;
+   299→        }
+   300→}
+   301→
+   302→function toAiSdkMessages(
+   303→        messages: readonly AgentMessage[],
+   304→        systemPrompt?: string,
+   305→        options?: { includeReasoning?: boolean; supportsImages?: boolean },
+   306→) {
+   307→        const includeReasoning = options?.includeReasoning ?? true;
+   308→        const normalizedMessages: AiSdkFormatterMessage[] = [];
+   309→
+   310→        for (const message of messages) {
+   311→                const content: AiSdkFormatterPart[] = [];
+   312→                let skippedReasoning = false;
+   313→                for (const part of message.content) {
+   314→                        if (part.type === "text") {
+   315→                                content.push({ type: "text", text: sanitizeSurrogates(part.text) });
+   316→                                continue;
+   317→                        }
+   318→
+   319→                        if (part.type === "reasoning") {
+   320→                                if (!includeReasoning) {
+   321→                                        skippedReasoning = true;
+   322→                                        continue;
+   323→                                }
+   324→                                const metadata = part.metadata as Record<string, unknown> | undefined;
+   325→                                const signature = metadata?.signature;
+   326→                                const redactedData = metadata?.redactedData;
+   327→                                content.push({
+   328→                                        type: "reasoning",
+   329→                                        text: sanitizeSurrogates(part.text),
+   330→                                        ...(typeof signature === "string" || typeof redactedData === "string"
+   331→                                                ? {
+   332→                                                                providerOptions: {
+   333→                                                                        anthropic: {
+   334→                                                                                ...(typeof signature === "string" ? { signature } : {}),
+   335→                                                                                ...(typeof redactedData === "string"
+   336→                                                                                        ? { redactedData }
+   337→                                                                                        : {}),
+   338→                                                                        },
+   339→                                                                },
+   340→                                                        }
+   341→                                                : {}),
+   342→                                });
+   343→                                continue;
+   344→                        }
+   345→
+   346→                        if (part.type === "file") {
+   347→                                content.push({
+   348→                                        type: "file",
+   349→                                        path: part.path,
+   350→                                        content: part.content,
+   351→                                });
+   352→                                continue;
+   353→                        }
+   354→
+   355→                        if (part.type === "image") {
+   356→                                content.push({
+   357→                                        type: "image",
+   358→                                        image: part.image,
+   359→                                        mediaType: part.mediaType,
+   360→                                });
+   361→                                continue;
+   362→                        }
+   363→
+   364→                        if (part.type === "tool-call") {
+   365→                                const metadata = part.metadata as Record<string, unknown> | undefined;
+   366→                                const thoughtSignature =
+   367→                                        metadata?.thoughtSignature ??
+   368→                                        metadata?.signature ??
+   369→                                        metadata?.thought_signature;
+   370→                                content.push({
+   371→                                        type: "tool-call",
+   372→                                        toolCallId: part.toolCallId,
+   373→                                        toolName: part.toolName,
+   374→                                        input: part.input,
+   375→                                        ...(typeof thoughtSignature === "string"
+   376→                                                ? {
+   377→                                                                providerOptions: {
+   378→                                                                        google: { thoughtSignature },
+   379→                                                                },
+   380→                                                        }
+   381→                                                : {}),
+   382→                                });
+   383→                                continue;
+   384→                        }
+   385→
+   386→                        if (part.type === "tool-result") {
+   387→                                content.push({
+   388→                                        type: "tool-result",
+   389→                                        toolCallId: part.toolCallId,
+   390→                                        toolName: part.toolName,
+   391→                                        output: part.output,
+   392→                                        isError: part.isError ?? false,
+   393→                                });
+   394→                        }
+   395→                }
+   396→
+   397→                // A message left empty only because its reasoning was dropped is
+   398→                // omitted entirely instead of forwarded as an empty turn.
+   399→                const emptiedByDroppedReasoning = !includeReasoning && skippedReasoning;
+   400→                if (content.length > 0) {
+   401→                        normalizedMessages.push({ role: message.role, content });
+   402→                } else if (
+   403→                        !emptiedByDroppedReasoning &&
+   404→                        (message.role === "user" || message.role === "assistant")
+   405→                ) {
+   406→                        normalizedMessages.push({ role: message.role, content: "" });
+   407→                }
+   408→        }
+   409→
+   410→        return formatMessagesForAiSdk(systemPrompt, normalizedMessages, {
+   411→                assistantToolCallArgKey: "input",
+   412→                supportsImages: options?.supportsImages,
+   413→        });
+   414→}
+   415→
+   416→function toAiSdkTools(request: GatewayStreamRequest): ToolSet | undefined {
+   417→        if (!request.tools?.length) {
+   418→                return undefined;
+   419→        }
+   420→
+   421→        // No validate callback on purpose: schema validation belongs to the tools
+   422→        // themselves (core executors validate with lenient union schemas that
+   423→        // accept common weak-model shapes like a bare string for a string[]
+   424→        // property). Rejecting here would return an error to the model without
+   425→        // the tool's own input handling ever seeing the call.
+   426→        const tools: ToolSet = {};
+   427→        for (const definition of request.tools) {
+   428→                tools[definition.name] = {
+   429→                        description: definition.description,
+   430→                        inputSchema: jsonSchema(
+   431→                                normalizeAiSdkToolInputSchema(definition.inputSchema),
+   432→                        ),
+   433→                };
+   434→        }
+   435→        return tools;
+   436→}
+   437→
+   438→interface RepairableToolCall {
+   439→        toolCallId: string;
+   440→        toolName: string;
+   441→        input: string;
+   442→}
+   443→
+   444→/**
+   445→ * Last-chance repair for tool calls whose arguments are not valid JSON
+   446→ * (truncated payloads, single quotes, unescaped newlines — common with
+   447→ * weaker models). Runs the raw argument text through the shared jsonrepair
+   448→ * strategies; unknown tool names and already-valid JSON are not repairable
+   449→ * here, and returning null preserves the AI SDK's original error behavior.
+   450→ */
+   451→export async function repairMalformedToolCall<T extends RepairableToolCall>({
+   452→        toolCall,
+   453→        error,
+   454→}: {
+   455→        toolCall: T;
+   456→        error: unknown;
+   457→}): Promise<T | null> {
+   458→        if (NoSuchToolError.isInstance(error)) {
+   459→                return null;
+   460→        }
+   461→        if (typeof toolCall.input !== "string" || toolCall.input.trim() === "") {
+   462→                return null;
+   463→        }
+   464→        try {
+   465→                JSON.parse(toolCall.input);
+   466→                // Valid JSON means the failure was a schema mismatch, not a parse
+   467→                // error. That is left to the tool executor's own lenient union
+   468→                // schemas; there is nothing to repair here.
+   469→                return null;
+   470→        } catch {
+   471→                // Not valid JSON — attempt repair below.
+   472→        }
+   473→        const repaired = parseJsonStream(toolCall.input);
+   474→        if (repaired === toolCall.input || typeof repaired === "string") {
+   475→                return null;
+   476→        }
+   477→        return { ...toolCall, input: JSON.stringify(repaired) };
+   478→}
+   479→
+   480→function normalizeAiSdkToolInputSchema(
+   481→        inputSchema: Record<string, unknown>,
+   482→): Record<string, unknown> {
+   483→        if (inputSchema.type === "object") {
+   484→                return inputSchema;
+   485→        }
+   486→
+   487→        return {
+   488→                type: "object",
+   489→                ...inputSchema,
+   490→        };
+   491→}
+   492→
+   493→function providerDisablesExternalToolExecution(
+   494→        context: GatewayProviderContext,
+   495→): boolean {
+   496→        return context.provider.capabilities?.includes("provider-tools") ?? false;
+   497→}
+   498→
+   499→function mergeToolCallMetadata(
+   500→        current: unknown,
+   501→        patch: Record<string, unknown>,
+   502→): Record<string, unknown> {
+   503→        if (!current || typeof current !== "object" || Array.isArray(current)) {
+   504→                return patch;
+   505→        }
+   506→        return {
+   507→                ...(current as Record<string, unknown>),
+   508→                ...patch,
+   509→        };
+   510→}
+   511→
+   512→function buildToolCallMetadata(input: {
+   513→        metadata: unknown;
+   514→        request: GatewayStreamRequest;
+   515→        context: GatewayProviderContext;
+   516→}): Record<string, unknown> {
+   517→        return mergeToolCallMetadata(input.metadata, {
+   518→                toolSource: {
+   519→                        providerId: input.request.providerId,
+   520→                        modelId: input.request.modelId,
+   521→                        executionMode: providerDisablesExternalToolExecution(input.context)
+   522→                                ? "provider"
+   523→                                : "runtime",
+   524→                },
+   525→        });
+   526→}
+   527→
+   528→function buildRecoverableToolErrorMetadata(input: {
+   529→        part: AiSdkStreamPart;
+   530→        errorMessage: string;
+   531→        request: GatewayStreamRequest;
+   532→        context: GatewayProviderContext;
+   533→        toolName: string;
+   534→}): Record<string, unknown> {
+   535→        return buildToolCallMetadata({
+   536→                metadata: mergeToolCallMetadata(extractGoogleThoughtMetadata(input.part), {
+   537→                        inputParseError: `Tool call ${input.toolName} was rejected before execution: ${input.errorMessage}`,
+   538→                        aiSdkToolError: input.errorMessage,
+   539→                }),
+   540→                request: input.request,
+   541→                context: input.context,
+   542→        });
+   543→}
+   544→
+   545→function resolveAiSdkSystemPrompt(
+   546→        request: GatewayStreamRequest,
+   547→): string | undefined {
+   548→        return request.providerId === "openai-codex"
+   549→                ? undefined
+   550→                : request.systemPrompt;
+   551→}
+   552→
+   553→function mapFinishReason(
+   554→        value: unknown,
+   555→        sawToolCalls: boolean,
+   556→): AgentModelFinishReason {
+   557→        if (value === "tool-calls" || value === "tool_calls" || sawToolCalls) {
+   558→                return "tool-calls";
+   559→        }
+   560→        if (value === "length" || value === "max_tokens") {
+   561→                return "max-tokens";
+   562→        }
+   563→        if (value === "error") {
+   564→                return "error";
+   565→        }
+   566→        return "stop";
+   567→}
+   568→
+   569→function getUsageValue(
+   570→        usage: Record<string, unknown>,
+   571→        ...keys: string[]
+   572→): number {
+   573→        for (const key of keys) {
+   574→                const value = usage[key];
+   575→                if (typeof value === "number" && Number.isFinite(value)) {
+   576→                        return value;
+   577→                }
+   578→                if (
+   579→                        typeof value === "string" &&
+   580→                        value.trim().length > 0 &&
+   581→                        Number.isFinite(Number(value))
+   582→                ) {
+   583→                        return Number(value);
+   584→                }
+   585→        }
+   586→        return 0;
+   587→}
+   588→
+   589→function getNumericValue(value: unknown): number | undefined {
+   590→        if (typeof value === "number" && Number.isFinite(value)) {
+   591→                return value;
+   592→        }
+   593→        if (
+   594→                typeof value === "string" &&
+   595→                value.trim().length > 0 &&
+   596→                Number.isFinite(Number(value))
+   597→        ) {
+   598→                return Number(value);
+   599→        }
+   600→        return undefined;
+   601→}
+   602→
+   603→function getNestedUsageValue(
+   604→        usage: Record<string, unknown>,
+   605→        ...path: string[]
+   606→): number {
+   607→        let current: unknown = usage;
+   608→        for (const key of path) {
+   609→                if (!current || typeof current !== "object") {
+   610→                        return 0;
+   611→                }
+   612→                current = (current as Record<string, unknown>)[key];
+   613→        }
+   614→        return getNumericValue(current) ?? 0;
+   615→}
+   616→
+   617→type UsagePath = readonly [string] | readonly [string, string];
+   618→
+   619→const REASONING_TOKEN_PATHS: UsagePath[] = [
+   620→        ["outputTokenDetails", "reasoningTokens"],
+   621→        ["output_tokens_details", "reasoning_tokens"],
+   622→        ["completion_tokens_details", "reasoning_tokens"],
+   623→        ["reasoningTokens"],
+   624→        ["reasoning_tokens"],
+   625→];
+   626→
+   627→function getUsageValueByPath(source: unknown, path: UsagePath): number {
+   628→        let current: unknown = source;
+   629→        for (const key of path) {
+   630→                if (!current || typeof current !== "object") {
+   631→                        return 0;
+   632→                }
+   633→                current = (current as Record<string, unknown>)[key];
+   634→        }
+   635→        return getNumericValue(current) ?? 0;
+   636→}
+   637→
+   638→function firstUsageValue(sources: unknown[], paths: UsagePath[]): number {
+   639→        for (const source of sources) {
+   640→                for (const path of paths) {
+   641→                        const value = getUsageValueByPath(source, path);
+   642→                        if (value > 0) {
+   643→                                return value;
+   644→                        }
+   645→                }
+   646→        }
+   647→        return 0;
+   648→}
+   649→
+   650→function extractProviderNestedUsage(
+   651→        value: unknown,
+   652→): Record<string, unknown> | undefined {
+   653→        if (!value || typeof value !== "object") {
+   654→                return undefined;
+   655→        }
+   656→
+   657→        const providerMetadata = value as Record<string, unknown>;
+   658→        for (const nestedValue of Object.values(providerMetadata)) {
+   659→                if (!nestedValue || typeof nestedValue !== "object") {
+   660→                        continue;
+   661→                }
+   662→
+   663→                const nestedMetadata = nestedValue as Record<string, unknown>;
+   664→                if (nestedMetadata.usage && typeof nestedMetadata.usage === "object") {
+   665→                        return nestedMetadata.usage as Record<string, unknown>;
+   666→                }
+   667→        }
+   668→
+   669→        return undefined;
+   670→}
+   671→
+   672→function calculateUsageCostFromPricing(
+   673→        usage: Omit<GatewayNormalizedUsage, "totalCost">,
+   674→        pricingValue: unknown,
+   675→): number | undefined {
+   676→        if (!pricingValue || typeof pricingValue !== "object") {
+   677→                return undefined;
+   678→        }
+   679→
+   680→        const pricing = pricingValue as Record<string, unknown>;
+   681→        const inputPrice = getNumericValue(pricing.input);
+   682→        const outputPrice = getNumericValue(pricing.output);
+   683→
+   684→        if (inputPrice === undefined || outputPrice === undefined) {
+   685→                return undefined;
+   686→        }
+   687→
+   688→        const cacheReadPrice = getNumericValue(pricing.cacheRead) ?? 0;
+   689→        const cacheWritePrice =
+   690→                getNumericValue(pricing.cacheWrite) ?? inputPrice * 1.25;
+   691→        const billableInputTokens = Math.max(
+   692→                0,
+   693→                usage.inputTokens - usage.cacheReadTokens - usage.cacheWriteTokens,
+   694→        );
+   695→
+   696→        return (
+   697→                (billableInputTokens / 1_000_000) * inputPrice +
+   698→                (usage.outputTokens / 1_000_000) * outputPrice +
+   699→                (usage.cacheReadTokens / 1_000_000) * cacheReadPrice +
+   700→                (usage.cacheWriteTokens / 1_000_000) * cacheWritePrice
+   701→        );
+   702→}
+   703→
+   704→/**
+   705→ * Normalizes usage from various provider formats into a standard structure.
+   706→ * Accepts both AI SDK's normalized shapes (AiSdkStreamTotalUsage, AiSdkStreamUsage)
+   707→ * and raw provider responses. Handles multiple naming conventions (camelCase vs snake_case),
+   708→ * extracts costs from provider-specific fields, and falls back to pricing-based calculation.
+   709→ *
+   710→ * @param usageValue - AI SDK normalized usage or raw provider response object
+   711→ * @param providerMetadata - Provider-specific metadata for cost extraction
+   712→ * @param pricingValue - Fallback pricing config (per 1M tokens) when no explicit cost found
+   713→ */
+   714→export function normalizeUsage(
+   715→        usageValue:
+   716→                | AiSdkStreamUsage
+   717→                | AiSdkStreamTotalUsage
+   718→                | Record<string, unknown>
+   719→                | undefined,
+   720→        providerMetadata?: unknown,
+   721→        pricingValue?: unknown,
+   722→): GatewayNormalizedUsage {
+   723→        const usage =
+   724→                usageValue && typeof usageValue === "object"
+   725→                        ? (usageValue as Record<string, unknown>)
+   726→                        : {};
+   727→        const providerUsage = extractProviderNestedUsage(providerMetadata);
+   728→        const providerMetadataRecord =
+   729→                providerMetadata && typeof providerMetadata === "object"
+   730→                        ? (providerMetadata as Record<string, unknown>)
+   731→                        : {};
+   732→        const gatewayMetadata =
+   733→                providerMetadataRecord.gateway &&
+   734→                typeof providerMetadataRecord.gateway === "object"
+   735→                        ? (providerMetadataRecord.gateway as Record<string, unknown>)
+   736→                        : {};
+   737→        const rawUsage =
+   738→                usage.raw && typeof usage.raw === "object"
+   739→                        ? (usage.raw as Record<string, unknown>)
+   740→                        : usage;
+   741→        const upstreamInferenceCost =
+   742→                getNumericValue(
+   743→                        (rawUsage.cost_details as Record<string, unknown> | undefined)
+   744→                                ?.upstream_inference_cost,
+   745→                ) ?? getNumericValue(rawUsage.upstream_inference_cost);
+   746→        const marketCost =
+   747→                getNumericValue(rawUsage.market_cost) ??
+   748→                getNumericValue(rawUsage.marketCost) ??
+   749→                getNumericValue(gatewayMetadata.marketCost);
+   750→        const baseCost =
+   751→                getNumericValue(rawUsage.cost) ?? getNumericValue(gatewayMetadata.cost);
+   752→        const hasExplicitCost =
+   753→                marketCost !== undefined ||
+   754→                baseCost !== undefined ||
+   755→                upstreamInferenceCost !== undefined;
+   756→        const isByokUsage =
+   757→                rawUsage.is_byok === true ||
+   758→                rawUsage.isByok === true ||
+   759→                gatewayMetadata.is_byok === true ||
+   760→                gatewayMetadata.isByok === true;
+   761→        const shouldAddUpstreamCost =
+   762→                isByokUsage &&
+   763→                baseCost !== undefined &&
+   764→                upstreamInferenceCost !== undefined;
+   765→        const costOrUpstream =
+   766→                baseCost !== undefined && baseCost > 0
+   767→                        ? baseCost
+   768→                        : (upstreamInferenceCost ?? baseCost);
+   769→        const totalCost =
+   770→                marketCost ??
+   771→                (shouldAddUpstreamCost ? baseCost + upstreamInferenceCost : costOrUpstream);
+   772→        const normalizedUsage = {
+   773→                inputTokens:
+   774→                        getNestedUsageValue(usage, "inputTokens", "total") ||
+   775→                        getUsageValue(usage, "inputTokens", "input_tokens", "prompt_tokens") ||
+   776→                        getUsageValue(rawUsage, "promptTokenCount", "prompt_token_count"),
+   777→                outputTokens:
+   778→                        getNestedUsageValue(usage, "outputTokens", "total") ||
+   779→                        getUsageValue(
+   780→                                usage,
+   781→                                "outputTokens",
+   782→                                "output_tokens",
+   783→                                "completion_tokens",
+   784→                        ) ||
+   785→                        getUsageValue(rawUsage, "candidatesTokenCount", "candidates_token_count"),
+   786→                cacheReadTokens:
+   787→                        getNestedUsageValue(usage, "inputTokens", "cacheRead") ||
+   788→                        getNestedUsageValue(usage, "inputTokenDetails", "cacheReadTokens") ||
+   789→                        getUsageValue(
+   790→                                usage,
+   791→                                "cachedInputTokens",
+   792→                                "cacheReadTokens",
+   793→                                "cache_read_tokens",
+   794→                                "cache_read_input_tokens",
+   795→                        ) ||
+   796→                        getNestedUsageValue(usage, "prompt_tokens_details", "cached_tokens") ||
+   797→                        getNestedUsageValue(rawUsage, "prompt_tokens_details", "cached_tokens") ||
+   798→                        getUsageValue(rawUsage, "cachedContentTokenCount") ||
+   799→                        getUsageValue(
+   800→                                providerUsage ?? {},
+   801→                                "cachedInputTokens",
+   802→                                "cacheReadTokens",
+   803→                                "cache_read_tokens",
+   804→                                "cache_read_input_tokens",
+   805→                        ),
+   806→                cacheWriteTokens:
+   807→                        getNestedUsageValue(usage, "inputTokens", "cacheWrite") ||
+   808→                        getNestedUsageValue(usage, "inputTokenDetails", "cacheWriteTokens") ||
+   809→                        getNestedUsageValue(
+   810→                                usage,
+   811→                                "prompt_tokens_details",
+   812→                                "cache_write_tokens",
+   813→                        ) ||
+   814→                        getUsageValue(
+   815→                                usage,
+   816→                                "cacheWriteTokens",
+   817→                                "cache_write_tokens",
+   818→                                "cache_creation_input_tokens",
+   819→                        ) ||
+   820→                        getNestedUsageValue(
+   821→                                rawUsage,
+   822→                                "prompt_tokens_details",
+   823→                                "cache_write_tokens",
+   824→                        ) ||
+   825→                        getUsageValue(
+   826→                                rawUsage,
+   827→                                "cacheWriteTokens",
+   828→                                "cache_write_tokens",
+   829→                                "cache_creation_input_tokens",
+   830→                        ) ||
+   831→                        getUsageValue(
+   832→                                providerUsage ?? {},
+   833→                                "cacheWriteTokens",
+   834→                                "cache_write_tokens",
+   835→                                "cache_creation_input_tokens",
+   836→                        ),
+   837→        };
+   838→        const reasoningTokenCount = firstUsageValue(
+   839→                [usage, rawUsage, providerUsage ?? {}],
+   840→                REASONING_TOKEN_PATHS,
+   841→        );
+   842→        const resolvedTotalCost =
+   843→                totalCost !== undefined
+   844→                        ? totalCost
+   845→                        : hasExplicitCost
+   846→                                ? undefined
+   847→                                : calculateUsageCostFromPricing(normalizedUsage, pricingValue);
+   848→
+   849→        return {
+   850→                ...normalizedUsage,
+   851→                ...(reasoningTokenCount > 0 ? { reasoningTokenCount } : {}),
+   852→                ...(typeof resolvedTotalCost === "number"
+   853→                        ? { totalCost: resolvedTotalCost }
+   854→                        : {}),
+   855→        };
+   856→}
+   857→
+   858→/**
+   859→ * Suppress unhandled rejections from AI SDK stream promises (usage, finishReason, etc.)
+   860→ * that reject with NoOutputGeneratedError when the stream encounters an error.
+   861→ *
+   862→ * The AI SDK's streamText result exposes lazy promise getters (finishReason, totalUsage,
+   863→ * steps, text, usage, etc.) backed by internal DelayedPromise instances. When the stream
+   864→ * errors with 0 recorded steps, the flush callback rejects all of them. We must access
+   865→ * each getter to obtain the promise and attach a no-op rejection handler before Bun/Node
+   866→ * surfaces them as unhandled rejections.
+   867→ */
+   868→function suppressDanglingStreamPromises(
+   869→        stream: AiSdkStreamResult | undefined,
+   870→): void {
+   871→        if (!stream) return;
+   872→        const noop = () => {};
+   873→        const suppress = (val: unknown) => {
+   874→                if (val && typeof (val as Promise<unknown>).catch === "function") {
+   875→                        (val as Promise<unknown>).catch(noop);
+   876→                }
+   877→        };
+   878→
+   879→        // Access known lazy promise getters on the AI SDK StreamTextResult object.
+   880→        const s = stream as Record<string, unknown>;
+   881→
+   882→        // Catch-all for any remaining promise-valued own properties.
+   883→        for (const key of Object.keys(stream)) {
+   884→                try {
+   885→                        suppress(s[key]);
+   886→                } catch {
+   887→                        // ignore
+   888→                }
+   889→        }
+   890→}
+   891→
+   892→function extractGoogleThoughtMetadata(
+   893→        part: AiSdkStreamPart,
+   894→): Record<string, unknown> | undefined {
+   895→        const metadata: Record<string, unknown> = {};
+   896→
+   897→        if (typeof part.thoughtSignature === "string") {
+   898→                metadata.thoughtSignature = part.thoughtSignature;
+   899→        }
+   900→        if (typeof part.thought_signature === "string") {
+   901→                metadata.thought_signature = part.thought_signature;
+   902→        }
+   903→
+   904→        const providerMetadata =
+   905→                part.providerMetadata && typeof part.providerMetadata === "object"
+   906→                        ? (part.providerMetadata as Record<string, unknown>)
+   907→                        : undefined;
+   908→        const googleMetadata =
+   909→                providerMetadata?.google && typeof providerMetadata.google === "object"
+   910→                        ? (providerMetadata.google as Record<string, unknown>)
+   911→                        : undefined;
+   912→        const vertexMetadata =
+   913→                providerMetadata?.vertex && typeof providerMetadata.vertex === "object"
+   914→                        ? (providerMetadata.vertex as Record<string, unknown>)
+   915→                        : undefined;
+   916→
+   917→        if (
+   918→                typeof metadata.thoughtSignature !== "string" &&
+   919→                typeof (
+   920→                        googleMetadata?.thoughtSignature ?? vertexMetadata?.thoughtSignature
+   921→                ) === "string"
+   922→        ) {
+   923→                metadata.thoughtSignature =
+   924→                        googleMetadata?.thoughtSignature ?? vertexMetadata?.thoughtSignature;
+   925→        }
+   926→        if (
+   927→                typeof metadata.thought_signature !== "string" &&
+   928→                typeof googleMetadata?.thought_signature === "string"
+   929→        ) {
+   930→                metadata.thought_signature = googleMetadata.thought_signature;
+   931→        }
+   932→
+   933→        return Object.keys(metadata).length > 0 ? metadata : undefined;
+   934→}
+   935→
+   936→/**
+   937→ * A stream error captured while the raw provider error object is still in
+   938→ * hand: the flattened display message plus its classification. Both are
+   939→ * derived here because the structure needed to classify does not survive
+   940→ * `extractErrorMessage`.
+   941→ */
+   942→interface CapturedStreamError {
+   943→        message: string;
+   944→        errorClass: ProviderErrorClass;
+   945→        /**
+   946→         * This layer already recorded `sdk.error` telemetry for the failure.
+   947→         * Forwarded as `errorReported` on the `finish` event so the agent loop
+   948→         * does not report the same failure a second time.
+   949→         */
+   950→        reported?: boolean;
+   951→}
+   952→
+   953→function captureStreamError(error: unknown): CapturedStreamError {
+   954→        return {
+   955→                message: extractErrorMessage(error),
+   956→                errorClass: classifyProviderError(error),
+   957→        };
+   958→}
+   959→
+   960→async function* emitAiSdkEvents(
+   961→        stream: AiSdkStreamResult,
+   962→        request: GatewayStreamRequest,
+   963→        context: GatewayProviderContext,
+   964→        pricingValue?: unknown,
+   965→        capturedError?: { current: CapturedStreamError | undefined },
+   966→): AsyncIterable<AgentModelEvent> {
+   967→        let sawToolCalls = false;
+   968→        const emittedToolCallIds = new Set<string>();
+   969→        let finishReason: unknown;
+   970→        let streamError: CapturedStreamError | undefined;
+   971→        let finishUsage: unknown;
+   972→        let finishProviderMetadata: unknown;
+   973→
+   974→        try {
+   975→                if (stream.fullStream) {
+   976→                        for await (const part of stream.fullStream) {
+   977→                                if (part.type === "text-delta") {
+   978→                                        const text =
+   979→                                                (part.textDelta as string | undefined) ??
+   980→                                                (part.text as string | undefined) ??
+   981→                                                (part.delta as string | undefined);
+   982→                                        if (text) {
+   983→                                                yield { type: "text-delta", text };
+   984→                                        }
+   985→                                        continue;
+   986→                                }
+   987→
+   988→                                if (part.type === "reasoning-delta" || part.type === "reasoning") {
+   989→                                        const text =
+   990→                                                (part.textDelta as string | undefined) ??
+   991→                                                (part.text as string | undefined) ??
+   992→                                                (part.reasoning as string | undefined);
+   993→                                        if (text) {
+   994→                                                yield {
+   995→                                                        type: "reasoning-delta",
+   996→                                                        text,
+   997→                                                        metadata: extractGoogleThoughtMetadata(part),
+   998→                                                };
+   999→                                        }
+  1000→                                        continue;
+  1001→                                }
+  1002→
+  1003→                                if (part.type === "file") {
+  1004→                                        // Model-generated file (e.g. image-output models). Convert it
+  1005→                                        // so a file-only turn reaches the assistant message instead of
+  1006→                                        // being dropped and failing as "Model returned empty response"
+  1007→                                        // — the retry middleware counts `file` parts as content on the
+  1008→                                        // same premise (see stream-part-classification.ts).
+  1009→                                        const file = part.file as
+  1010→                                                | { base64?: string; mediaType?: string }
+  1011→                                                | undefined;
+  1012→                                        const data = file?.base64;
+  1013→                                        if (typeof data === "string" && data.length > 0) {
+  1014→                                                yield {
+  1015→                                                        type: "file",
+  1016→                                                        data,
+  1017→                                                        mediaType: file?.mediaType ?? "application/octet-stream",
+  1018→                                                };
+  1019→                                        }
+  1020→                                        continue;
+  1021→                                }
+  1022→
+  1023→                                if (part.type === "tool-call") {
+  1024→                                        sawToolCalls = true;
+  1025→                                        const toolCallId =
+  1026→                                                (part.toolCallId as string | undefined) ??
+  1027→                                                (part.id as string | undefined) ??
+  1028→                                                `tool_${nanoid()}`;
+  1029→                                        emittedToolCallIds.add(toolCallId);
+  1030→                                        const input = (part.input ?? part.args ?? {}) as unknown;
+  1031→                                        const inputText =
+  1032→                                                typeof input === "string" ? input : JSON.stringify(input);
+  1033→                                        yield {
+  1034→                                                type: "tool-call-delta",
+  1035→                                                toolCallId,
+  1036→                                                toolName:
+  1037→                                                        (part.toolName as string | undefined) ??
+  1038→                                                        (part.name as string | undefined) ??
+  1039→                                                        "tool",
+  1040→                                                input: typeof input === "string" ? undefined : input,
+  1041→                                                inputText,
+  1042→                                                metadata: buildToolCallMetadata({
+  1043→                                                        metadata: extractGoogleThoughtMetadata(part),
+  1044→                                                        request,
+  1045→                                                        context,
+  1046→                                                }),
+  1047→                                        };
+  1048→                                        continue;
+  1049→                                }
+  1050→
+  1051→                                if (part.type === "tool-error") {
+  1052→                                        sawToolCalls = true;
+  1053→                                        const toolCallId =
+  1054→                                                (part.toolCallId as string | undefined) ??
+  1055→                                                (part.id as string | undefined) ??
+  1056→                                                `tool_${nanoid()}`;
+  1057→                                        const alreadyEmitted = emittedToolCallIds.has(toolCallId);
+  1058→                                        emittedToolCallIds.add(toolCallId);
+  1059→                                        const toolName =
+  1060→                                                (part.toolName as string | undefined) ??
+  1061→                                                (part.name as string | undefined) ??
+  1062→                                                "tool";
+  1063→                                        const input = (part.input ?? part.args ?? {}) as unknown;
+  1064→                                        const inputText =
+  1065→                                                typeof input === "string" ? input : JSON.stringify(input);
+  1066→                                        const errorMessage =
+  1067→                                                part.error === undefined
+  1068→                                                        ? "Tool input was rejected by the model adapter"
+  1069→                                                        : extractErrorMessage(part.error);
+  1070→                                        yield {
+  1071→                                                type: "tool-call-delta",
+  1072→                                                toolCallId,
+  1073→                                                toolName,
+  1074→                                                input: alreadyEmitted
+  1075→                                                        ? undefined
+  1076→                                                        : typeof input === "string"
+  1077→                                                                ? undefined
+  1078→                                                                : input,
+  1079→                                                inputText: alreadyEmitted ? undefined : inputText,
+  1080→                                                metadata: buildRecoverableToolErrorMetadata({
+  1081→                                                        part,
+  1082→                                                        errorMessage,
+  1083→                                                        request,
+  1084→                                                        context,
+  1085→                                                        toolName,
+  1086→                                                }),
+  1087→                                        };
+  1088→                                        continue;
+  1089→                                }
+  1090→
+  1091→                                if (part.type === "finish") {
+  1092→                                        finishUsage = part.usage ?? part.totalUsage;
+  1093→                                        finishProviderMetadata = part.providerMetadata;
+  1094→                                        finishReason =
+  1095→                                                part.finishReason ?? part.rawFinishReason ?? part.reason;
+  1096→                                }
+  1097→
+  1098→                                if (part.type === "error") {
+  1099→                                        streamError =
+  1100→                                                capturedError?.current ?? captureStreamError(part.error);
+  1101→                                        break;
+  1102→                                }
+  1103→
+  1104→                                if (part.type === "abort") {
+  1105→                                        // abort
+  1106→                                        break;
+  1107→                                }
+  1108→                        }
+  1109→                } else if (stream.textStream) {
+  1110→                        for await (const text of stream.textStream) {
+  1111→                                yield { type: "text-delta", text };
+  1112→                        }
+  1113→                }
+  1114→        } catch (error) {
+  1115→                // Prefer the real provider error from onError over the generic
+  1116→                // NoOutputGeneratedError the AI SDK throws when 0 steps are recorded.
+  1117→                streamError = capturedError?.current ?? captureStreamError(error);
+  1118→        }
+  1119→
+  1120→        // Prefer stream.usage (has raw cost data) over finish part usage.
+  1121→        // stream.usage may be undefined in mocked/test scenarios, fall back to finish part + its providerMetadata.
+  1122→        let usageToEmit: unknown;
+  1123→        let metadataToUse: unknown;
+  1124→        if (streamError) {
+  1125→                usageToEmit = finishUsage;
+  1126→                metadataToUse = finishProviderMetadata;
+  1127→        } else if (stream.usage) {
+  1128→                try {
+  1129→                        usageToEmit = await stream.usage;
+  1130→                } catch (error) {
+  1131→                        if (!streamError) {
+  1132→                                streamError = capturedError?.current ?? captureStreamError(error);
+  1133→                        }
+  1134→                        usageToEmit = finishUsage;
+  1135→                        metadataToUse = finishProviderMetadata;
+  1136→                }
+  1137→        } else {
+  1138→                usageToEmit = finishUsage;
+  1139→                metadataToUse = finishProviderMetadata;
+  1140→        }
+  1141→
+  1142→        if (usageToEmit) {
+  1143→                yield {
+  1144→                        type: "usage",
+  1145→                        usage: normalizeUsage(usageToEmit, metadataToUse, pricingValue),
+  1146→                };
+  1147→        }
+  1148→
+  1149→        yield {
+  1150→                type: "finish",
+  1151→                reason: streamError ? "error" : mapFinishReason(finishReason, sawToolCalls),
+  1152→                error: streamError?.message,
+  1153→                errorClass: streamError?.errorClass,
+  1154→                errorReported: streamError?.reported,
+  1155→        };
+  1156→}
+  1157→
+  1158→async function createProviderModule(
+  1159→        kind: ProviderModuleKind,
+  1160→        config: GatewayResolvedProviderConfig,
+  1161→        context: GatewayProviderContext,
+  1162→): Promise<ProviderFactoryResult> {
+  1163→        switch (kind) {
+  1164→                case "openai": {
+  1165→                        const { createOpenAIProviderModule } = await import("./vendors/openai");
+  1166→                        return createOpenAIProviderModule(config, context);
+  1167→                }
+  1168→                case "openai-compatible": {
+  1169→                        const { createOpenAICompatibleProviderModule } = await import(
+  1170→                                "./vendors/openai-compatible"
+  1171→                        );
+  1172→                        return createOpenAICompatibleProviderModule(config, context);
+  1173→                }
+  1174→                case "anthropic": {
+  1175→                        const { createAnthropicProviderModule } = await import(
+  1176→                                "./vendors/anthropic"
+  1177→                        );
+  1178→                        return createAnthropicProviderModule(config, context);
+  1179→                }
+  1180→                case "google": {
+  1181→                        const { createGoogleProviderModule } = await import("./vendors/google");
+  1182→                        return createGoogleProviderModule(config, context);
+  1183→                }
+  1184→                case "vertex": {
+  1185→                        const { createVertexProviderModule } = await import("./vendors/vertex");
+  1186→                        return createVertexProviderModule(config, context);
+  1187→                }
+  1188→                case "bedrock": {
+  1189→                        const { createBedrockProviderModule } = await import("./vendors/bedrock");
+  1190→                        return createBedrockProviderModule(config);
+  1191→                }
+  1192→                case "mistral": {
+  1193→                        const { createMistralProviderModule } = await import("./vendors/mistral");
+  1194→                        return createMistralProviderModule(config);
+  1195→                }
+  1196→                case "claude-code": {
+  1197→                        const { createClaudeCodeProviderModule } = await import(
+  1198→                                "./vendors/community"
+  1199→                        );
+  1200→                        return createClaudeCodeProviderModule(config);
+  1201→                }
+  1202→                case "openai-codex": {
+  1203→                        const { createOpenAICodexProviderModule } = await import(
+  1204→                                "./vendors/community"
+  1205→                        );
+  1206→                        return createOpenAICodexProviderModule(config);
+  1207→                }
+  1208→                case "opencode": {
+  1209→                        const { createOpenCodeProviderModule } = await import(
+  1210→                                "./vendors/community"
+  1211→                        );
+  1212→                        return createOpenCodeProviderModule(config);
+  1213→                }
+  1214→                case "dify": {
+  1215→                        const { createDifyProviderModule } = await import("./vendors/community");
+  1216→                        return createDifyProviderModule(config);
+  1217→                }
+  1218→                case "ollama": {
+  1219→                        const { createOllamaProviderModule } = await import("./vendors/ollama");
+  1220→                        return createOllamaProviderModule(config, context);
+  1221→                }
+  1222→                case "sapaicore": {
+  1223→                        const { createSapAiCoreProviderModule } = await import(
+  1224→                                "./vendors/community"
+  1225→                        );
+  1226→                        return createSapAiCoreProviderModule(config);
+  1227→                }
+  1228→        }
+  1229→}
+  1230→
+  1231→/**
+  1232→ * Wrap a vendor-constructed model with the transient-failure retry
+  1233→ * middleware (empty responses + pre-content network interruptions).
+  1234→ *
+  1235→ * All-empty turns (no text, no reasoning, no tool call) are a cross-provider
+  1236→ * phenomenon: production telemetry shows them on hosted backends (openrouter,
+  1237→ * cline, generic OpenAI-compatible endpoints), not just local Ollama. An
+  1238→ * empty assistant turn is a hard failure in the agent runtime ("Model
+  1239→ * returned empty response"), so a single transient flake kills the task.
+  1240→ * The same telemetry shows mid-stream network deaths (UND_ERR_SOCKET,
+  1241→ * body/headers timeouts, ECONNRESET) as the dominant network-class run
+  1242→ * killer — the AI SDK's own retry covers only request initiation, so once a
+  1243→ * stream has started nothing else retries. Retrying here — the one
+  1244→ * composition point every AI SDK vendor flows through — turns those flakes
+  1245→ * into non-events while leaving the runtime's loud failure in place for
+  1246→ * models that are persistently empty or connections that are truly down.
+  1247→ *
+  1248→ * Applied as the *outermost* wrap so each retry re-runs the vendor's full
+  1249→ * request pipeline, including any vendor-level middleware attached inside
+  1250→ * `provider.model(...)`. Vendors opt out or tune attempts through
+  1251→ * `ProviderFactoryResult.retryEmptyResponses`.
+  1252→ */
+  1253→export function withEmptyResponseRetry(
+  1254→        model: unknown,
+  1255→        retryEmptyResponses: ProviderFactoryResult["retryEmptyResponses"],
+  1256→        logger: GatewayProviderContext["logger"],
+  1257→): unknown {
+  1258→        if (retryEmptyResponses === false) {
+  1259→                return model;
+  1260→        }
+  1261→        return wrapLanguageModel({
+  1262→                model: model as LanguageModelV4,
+  1263→                middleware: createRetryEmptyResponseMiddleware({
+  1264→                        ...retryEmptyResponses,
+  1265→                        logger,
+  1266→                }),
+  1267→        });
+  1268→}
+  1269→
+  1270→function createAiSdkProvider(kind: ProviderModuleKind): GatewayProviderFactory {
+  1271→        return async (config) => ({
+  1272→                async *stream(request, context) {
+  1273→                        const log = context.logger;
+  1274→                        let stream: AiSdkStreamResult | undefined;
+  1275→                        const capturedError: { current: CapturedStreamError | undefined } = {
+  1276→                                current: undefined,
+  1277→                        };
+  1278→                        try {
+  1279→                                const provider = await createProviderModule(
+  1280→                                        kind,
+  1281→                                        {
+  1282→                                                ...config,
+  1283→                                                fetch: wrapFetchForStickySession(
+  1284→                                                        wrapFetchForProviderRequestCapture(config.fetch, request),
+  1285→                                                        request,
+  1286→                                                        context,
+  1287→                                                ),
+  1288→                                        },
+  1289→                                        context,
+  1290→                                );
+  1291→                                const langfuse = await ensureGatewayLangfuseTelemetry(
+  1292→                                        config.providerId,
+  1293→                                );
+  1294→                                const tools = providerDisablesExternalToolExecution(context)
+  1295→                                        ? undefined
+  1296→                                        : toAiSdkTools(request);
+  1297→                                const systemPrompt = resolveAiSdkSystemPrompt(request);
+  1298→                                const useSystemOption =
+  1299→                                        typeof systemPrompt === "string" && systemPrompt.trim().length > 0;
+  1300→                                const messagesSystemPrompt = useSystemOption ? undefined : systemPrompt;
+  1301→                                const messages = buildAiSdkRequestMessages(
+  1302→                                        request,
+  1303→                                        context,
+  1304→                                        messagesSystemPrompt,
+  1305→                                );
+  1306→                                const portableReasoning = resolvePortableReasoning(request);
+  1307→                                const providerOptions = composeAiSdkProviderOptions(
+  1308→                                        request,
+  1309→                                        context,
+  1310→                                        kind,
+  1311→                                ) as never;
+  1312→                                const requestConfig = provider.buildStreamConfig
+  1313→                                        ? provider.buildStreamConfig(request, context)
+  1314→                                        : buildAiSdkStreamConfig(request, context);
+  1315→                                recordProviderRequestCapture({
+  1316→                                        stage: "ai_sdk_prompt",
+  1317→                                        request,
+  1318→                                        payload: {
+  1319→                                                messages,
+  1320→                                                ...(useSystemOption ? { system: systemPrompt } : {}),
+  1321→                                                tools,
+  1322→                                                providerOptions,
+  1323→                                                ...requestConfig,
+  1324→                                                ...(portableReasoning ? { reasoning: portableReasoning } : {}),
+  1325→                                        },
+  1326→                                });
+  1327→                                stream = streamText({
+  1328→                                        model: withEmptyResponseRetry(
+  1329→                                                provider.model(context.model.id),
+  1330→                                                provider.retryEmptyResponses,
+  1331→                                                context.logger,
+  1332→                                        ) as never,
+  1333→                                        messages: messages as never,
+  1334→                                        ...(useSystemOption ? { system: systemPrompt } : {}),
+  1335→                                        ...(tools ? { tools } : {}),
+  1336→                                        abortSignal: request.signal,
+  1337→                                        experimental_repairToolCall: repairMalformedToolCall as never,
+  1338→                                        experimental_telemetry: {
+  1339→                                                isEnabled: langfuse,
+  1340→                                        },
+  1341→                                        providerOptions,
+  1342→                                        ...requestConfig,
+  1343→                                        ...(portableReasoning ? { reasoning: portableReasoning } : {}),
+  1344→                                        onError: ({ error: streamError }) => {
+  1345→                                                const captured = captureStreamError(streamError);
+  1346→                                                const msg = captured.message;
+  1347→                                                capturedError.current = captured;
+  1348→                                                if (log?.error) {
+  1349→                                                        log.error("[ai-sdk] stream error", {
+  1350→                                                                providerId: request.providerId,
+  1351→                                                                error: streamError,
+  1352→                                                                severity: "error",
+  1353→                                                        });
+  1354→                                                } else if (log) {
+  1355→                                                        log.log(`[ai-sdk] stream error: ${msg}`, {
+  1356→                                                                providerId: request.providerId,
+  1357→                                                                severity: "error",
+  1358→                                                        });
+  1359→                                                }
+  1360→                                                captured.reported = captureSdkError(context.telemetry, {
+  1361→                                                        component: "llms",
+  1362→                                                        operation: "provider.stream",
+  1363→                                                        error: streamError,
+  1364→                                                        errorMessage: msg,
+  1365→                                                        severity: "error",
+  1366→                                                        handled: true,
+  1367→                                                        context: {
+  1368→                                                                providerId: request.providerId,
+  1369→                                                                modelId: request.modelId,
+  1370→                                                                providerKind: kind,
+  1371→                                                        },
+  1372→                                                });
+  1373→                                        },
+  1374→                                }) as unknown as AiSdkStreamResult;
+  1375→
+  1376→                                // Suppress dangling promise rejections (finishReason, totalUsage, steps, etc.)
+  1377→                                // BEFORE iterating. The AI SDK rejects these DelayedPromises inside the stream's
+  1378→                                // flush callback, which runs during iteration, so we must attach .catch() handlers
+  1379→                                // upfront or Bun/Node will surface them as unhandled rejections.
+  1380→                                suppressDanglingStreamPromises(stream);
+  1381→
+  1382→                                yield* emitAiSdkEvents(
+  1383→                                        stream,
+  1384→                                        request,
+  1385→                                        context,
+  1386→                                        context.model.metadata?.pricing,
+  1387→                                        capturedError,
+  1388→                                );
+  1389→                        } catch (error) {
+  1390→                                suppressDanglingStreamPromises(stream);
+  1391→                                // Prefer the real provider error captured in onError over the generic
+  1392→                                // NoOutputGeneratedError that the AI SDK throws when 0 steps are recorded.
+  1393→                                const captured = capturedError.current ?? captureStreamError(error);
+  1394→                                const msg = captured.message;
+  1395→                                if (log?.error) {
+  1396→                                        log.error("[ai-sdk] provider error", {
+  1397→                                                providerId: request.providerId,
+  1398→                                                error,
+  1399→                                                severity: "error",
+  1400→                                        });
+  1401→                                } else if (log) {
+  1402→                                        log.log(`[ai-sdk] provider error: ${msg}`, {
+  1403→                                                providerId: request.providerId,
+  1404→                                                severity: "error",
+  1405→                                        });
+  1406→                                }
+  1407→                                const reported = captureSdkError(context.telemetry, {
+  1408→                                        component: "llms",
+  1409→                                        operation: "provider.create_or_stream",
+  1410→                                        error,
+  1411→                                        errorMessage: msg,
+  1412→                                        severity: "error",
+  1413→                                        handled: true,
+  1414→                                        context: {
+  1415→                                                providerId: request.providerId,
+  1416→                                                modelId: request.modelId,
+  1417→                                                providerKind: kind,
+  1418→                                        },
+  1419→                                });
+  1420→                                yield {
+  1421→                                        type: "finish",
+  1422→                                        reason: "error",
+  1423→                                        error: msg,
+  1424→                                        errorClass: captured.errorClass,
+  1425→                                        errorReported: reported || captured.reported,
+  1426→                                };
+  1427→                        }
+  1428→                },
+  1429→        });
+  1430→}
+  1431→
+  1432→export const createOpenAIProvider = createAiSdkProvider("openai");
+  1433→export const createOpenAICompatibleProvider =
+  1434→        createAiSdkProvider("openai-compatible");
+  1435→export const createAnthropicProvider = createAiSdkProvider("anthropic");
+  1436→export const createGoogleProvider = createAiSdkProvider("google");
+  1437→export const createVertexProvider = createAiSdkProvider("vertex");
+  1438→export const createBedrockProvider = createAiSdkProvider("bedrock");
+  1439→export const createMistralProvider = createAiSdkProvider("mistral");
+  1440→export const createClaudeCodeProvider = createAiSdkProvider("claude-code");
+  1441→export const createOpenAICodexProvider = createAiSdkProvider("openai-codex");
+  1442→export const createOpenCodeProvider = createAiSdkProvider("opencode");
+  1443→export const createDifyProvider = createAiSdkProvider("dify");
+  1444→export const createOllamaProvider = createAiSdkProvider("ollama");
+  1445→export const createSapAiCoreProvider = createAiSdkProvider("sapaicore");
+  1446→

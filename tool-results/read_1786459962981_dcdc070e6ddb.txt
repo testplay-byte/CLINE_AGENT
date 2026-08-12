@@ -1,0 +1,942 @@
+     1→/**
+     2→ * Default AgentTool Definitions
+     3→ *
+     4→ * Factory functions for creating the default tools.
+     5→ */
+     6→
+     7→import {
+     8→        type AgentTool,
+     9→        type AgentToolContext,
+    10→        createTool,
+    11→        getDefaultShell,
+    12→        getShellKind,
+    13→        type ITelemetryService,
+    14→        type ShellKind,
+    15→        validateWithZod,
+    16→        zodToJsonSchema,
+    17→} from "@cline/shared";
+    18→import { captureRunCommandsTimeout } from "../../services/telemetry/core-events";
+    19→import { CommandExitError } from "./executors/bash";
+    20→import {
+    21→        MAX_COMMAND_OUTPUT_CHARS,
+    22→        MAX_READ_LINES,
+    23→        MAX_READ_OUTPUT_CHARS,
+    24→        MAX_SEARCH_OUTPUT_CHARS,
+    25→} from "./executors/output-limits";
+    26→import {
+    27→        coalesceOrphanReadRanges,
+    28→        formatError,
+    29→        formatReadFileQuery,
+    30→        formatRunCommandQueryPreview,
+    31→        getEditorSizeError,
+    32→        getReadFileRangeError,
+    33→        normalizeRunCommandsInput,
+    34→        TimeoutError,
+    35→        withTimeout,
+    36→} from "./helpers";
+    37→import {
+    38→        type ApplyPatchInput,
+    39→        ApplyPatchInputSchema,
+    40→        ApplyPatchInputUnionSchema,
+    41→        type AskQuestionInput,
+    42→        AskQuestionInputSchema,
+    43→        type EditFileInput,
+    44→        EditFileInputSchema,
+    45→        type FetchWebContentInput,
+    46→        FetchWebContentInputSchema,
+    47→        type ReadFileRequest,
+    48→        type ReadFilesInput,
+    49→        ReadFilesInputSchema,
+    50→        ReadFilesInputUnionSchema,
+    51→        RunCommandsInputSchema,
+    52→        type SearchCodebaseInput,
+    53→        SearchCodebaseInputSchema,
+    54→        SearchCodebaseUnionInputSchema,
+    55→        type SkillsInput,
+    56→        SkillsInputSchema,
+    57→        type StructuredCommandInput,
+    58→        type SubmitInput,
+    59→        SubmitInputSchema,
+    60→} from "./schemas";
+    61→import type {
+    62→        ApplyPatchExecutor,
+    63→        AskQuestionExecutor,
+    64→        CreateDefaultToolsOptions,
+    65→        DefaultToolsConfig,
+    66→        EditorExecutor,
+    67→        FileReadExecutor,
+    68→        SearchExecutor,
+    69→        ShellExecutor,
+    70→        SkillsExecutorWithMetadata,
+    71→        ToolOperationResult,
+    72→        VerifySubmitExecutor,
+    73→        WebFetchExecutor,
+    74→} from "./types";
+    75→
+    76→// =============================================================================
+    77→// Helper Functions
+    78→// =============================================================================
+    79→
+    80→function getStringMetadata(
+    81→        context: AgentToolContext,
+    82→        key: string,
+    83→): string | undefined {
+    84→        const value = context.metadata?.[key];
+    85→        return typeof value === "string" ? value : undefined;
+    86→}
+    87→
+    88→function captureRunCommandsTimeoutFromContext(
+    89→        telemetry: ITelemetryService | undefined,
+    90→        context: AgentToolContext,
+    91→        properties: {
+    92→                effectiveTimeoutMs: number;
+    93→                timeoutSource: "default_setting" | "configured_setting";
+    94→                commandCount: number;
+    95→                durationMs: number;
+    96→        },
+    97→): void {
+    98→        captureRunCommandsTimeout(telemetry, {
+    99→                tool_name: "run_commands",
+   100→                effective_timeout_ms: properties.effectiveTimeoutMs,
+   101→                timeout_source: properties.timeoutSource,
+   102→                command_count: properties.commandCount,
+   103→                duration_ms: properties.durationMs,
+   104→                ulid: context.sessionId,
+   105→                mode: getStringMetadata(context, "mode"),
+   106→                source: getStringMetadata(context, "source"),
+   107→                session_id: context.sessionId,
+   108→                agent_id: context.agentId,
+   109→                conversation_id: context.conversationId,
+   110→                run_id: context.runId,
+   111→                iteration: context.iteration,
+   112→                tool_call_id: context.toolCallId,
+   113→        });
+   114→}
+   115→
+   116→function getHeredocDelimiter(command: string): string | undefined {
+   117→        const match = command.match(
+   118→                /(?<![<])<<-?\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_./-]+))/,
+   119→        );
+   120→        return match?.[1] ?? match?.[2] ?? match?.[3];
+   121→}
+   122→
+   123→function coalesceSplitHeredocCommands(commands: string[]): string[] {
+   124→        const coalesced: string[] = [];
+   125→        for (let index = 0; index < commands.length; index += 1) {
+   126→                const command = commands[index];
+   127→                const delimiter = getHeredocDelimiter(command);
+   128→                if (!delimiter) {
+   129→                        coalesced.push(command);
+   130→                        continue;
+   131→                }
+   132→
+   133→                const endIndex = commands.findIndex(
+   134→                        (nextCommand, nextIndex) =>
+   135→                                nextIndex > index && nextCommand.trim() === delimiter,
+   136→                );
+   137→                if (endIndex === -1) {
+   138→                        coalesced.push(command);
+   139→                        continue;
+   140→                }
+   141→
+   142→                const parts = [command];
+   143→                while (index < endIndex) {
+   144→                        index += 1;
+   145→                        const nextCommand = commands[index];
+   146→                        parts.push(nextCommand);
+   147→                }
+   148→                coalesced.push(parts.join("\n"));
+   149→        }
+   150→        return coalesced;
+   151→}
+   152→
+   153→function coalesceAdjacentStringHeredocs(
+   154→        commands: Array<string | StructuredCommandInput>,
+   155→): Array<string | StructuredCommandInput> {
+   156→        const coalesced: Array<string | StructuredCommandInput> = [];
+   157→        let stringRun: string[] = [];
+   158→
+   159→        const flushStringRun = () => {
+   160→                if (stringRun.length > 0) {
+   161→                        coalesced.push(...coalesceSplitHeredocCommands(stringRun));
+   162→                        stringRun = [];
+   163→                }
+   164→        };
+   165→
+   166→        for (const command of commands) {
+   167→                if (typeof command === "string") {
+   168→                        stringRun.push(command);
+   169→                        continue;
+   170→                }
+   171→
+   172→                flushStringRun();
+   173→                coalesced.push(command);
+   174→        }
+   175→
+   176→        flushStringRun();
+   177→        return coalesced;
+   178→}
+   179→
+   180→async function executeShellCommands(
+   181→        commands: Array<string | StructuredCommandInput>,
+   182→        options: {
+   183→                executor: ShellExecutor;
+   184→                cwd: string;
+   185→                context: AgentToolContext;
+   186→                timeoutMs: number;
+   187→                timeoutSource: "default_setting" | "configured_setting";
+   188→                telemetry?: ITelemetryService;
+   189→        },
+   190→): Promise<ToolOperationResult[]> {
+   191→        const { executor, cwd, context, timeoutMs, timeoutSource, telemetry } =
+   192→                options;
+   193→
+   194→        return Promise.all(
+   195→                commands.map(async (command): Promise<ToolOperationResult> => {
+   196→                        const startedAt = Date.now();
+   197→                        const query = formatRunCommandQueryPreview(command);
+   198→                        try {
+   199→                                const output = await withTimeout(
+   200→                                        executor(command, cwd, context),
+   201→                                        timeoutMs,
+   202→                                        `Command timed out after ${timeoutMs}ms`,
+   203→                                );
+   204→                                return {
+   205→                                        query,
+   206→                                        result: output,
+   207→                                        success: true,
+   208→                                };
+   209→                        } catch (error) {
+   210→                                if (error instanceof TimeoutError) {
+   211→                                        captureRunCommandsTimeoutFromContext(telemetry, context, {
+   212→                                                effectiveTimeoutMs: error.timeoutMs,
+   213→                                                timeoutSource,
+   214→                                                commandCount: commands.length,
+   215→                                                durationMs: Date.now() - startedAt,
+   216→                                        });
+   217→                                }
+   218→                                if (error instanceof CommandExitError) {
+   219→                                        return {
+   220→                                                query,
+   221→                                                result: error.output,
+   222→                                                error: error.message,
+   223→                                                success: false,
+   224→                                        };
+   225→                                }
+   226→                                const msg = formatError(error);
+   227→                                return {
+   228→                                        query,
+   229→                                        result: "",
+   230→                                        error: `Command failed: ${msg}`,
+   231→                                        success: false,
+   232→                                };
+   233→                        }
+   234→                }),
+   235→        );
+   236→}
+   237→
+   238→// =============================================================================
+   239→// AgentTool Factory Functions
+   240→// =============================================================================
+   241→
+   242→/**
+   243→ * Create the read_files tool
+   244→ *
+   245→ * Reads the content of one or more files from the filesystem.
+   246→ */
+   247→export function createReadFilesTool(
+   248→        executor: FileReadExecutor,
+   249→        config: Pick<DefaultToolsConfig, "fileReadTimeoutMs"> = {},
+   250→): AgentTool<ReadFilesInput, ToolOperationResult[]> {
+   251→        const timeoutMs = config.fileReadTimeoutMs ?? 10000;
+   252→
+   253→        return createTool<ReadFilesInput, ToolOperationResult[]>({
+   254→                name: "read_files",
+   255→                description:
+   256→                        "Read the content of text or image files at the provided absolute paths, or return only an inclusive one-based line range when start_line/end_line are provided on the same file entry as its path. " +
+   257→                        "When you already know multiple files you need, read them together in one call, and call this tool in the same response as other independent tool calls. " +
+   258→                        `Each read returns at most ${MAX_READ_LINES} lines / ~${Math.round(MAX_READ_OUTPUT_CHARS / 1024)}k characters; longer files report their total line count, page through them with start_line/end_line on that file's entry. ` +
+   259→                        "Binary files that are not image and large files are not supported. " +
+   260→                        "Returns file contents or error messages for each path. ",
+   261→                inputSchema: zodToJsonSchema(ReadFilesInputSchema),
+   262→                timeoutMs: timeoutMs * 2, // Account for multiple files
+   263→                retryable: true,
+   264→                maxRetries: 1,
+   265→                execute: async (input, context) => {
+   266→                        const validate = validateWithZod(
+   267→                                ReadFilesInputUnionSchema,
+   268→                                coalesceOrphanReadRanges(input),
+   269→                        );
+   270→                        let requests: ReadFileRequest[];
+   271→                        if (typeof validate === "string") {
+   272→                                requests = [{ path: validate }];
+   273→                        } else if (Array.isArray(validate)) {
+   274→                                requests = validate.map((value) =>
+   275→                                        typeof value === "string" ? { path: value } : value,
+   276→                                );
+   277→                        } else if ("files" in validate) {
+   278→                                const files = Array.isArray(validate.files)
+   279→                                        ? validate.files
+   280→                                        : [validate.files];
+   281→                                requests = files.map((file) =>
+   282→                                        typeof file === "string" ? { path: file } : file,
+   283→                                );
+   284→                        } else if ("file_paths" in validate) {
+   285→                                const filePaths = Array.isArray(validate.file_paths)
+   286→                                        ? validate.file_paths
+   287→                                        : [validate.file_paths];
+   288→                                requests = filePaths.map((path) => ({ path }));
+   289→                        } else if ("paths" in validate) {
+   290→                                const paths = Array.isArray(validate.paths)
+   291→                                        ? validate.paths
+   292→                                        : [validate.paths];
+   293→                                requests = paths.map((path) =>
+   294→                                        typeof path === "string" ? { path } : path,
+   295→                                );
+   296→                        } else {
+   297→                                requests = [validate];
+   298→                        }
+   299→
+   300→                        return Promise.all(
+   301→                                requests.map(async (request): Promise<ToolOperationResult> => {
+   302→                                        const rangeError = getReadFileRangeError(request);
+   303→                                        if (rangeError) {
+   304→                                                return {
+   305→                                                        query: formatReadFileQuery(request),
+   306→                                                        result: "",
+   307→                                                        error: `Invalid file range: ${rangeError}`,
+   308→                                                        success: false,
+   309→                                                };
+   310→                                        }
+   311→
+   312→                                        try {
+   313→                                                const content = await withTimeout(
+   314→                                                        executor(request, context),
+   315→                                                        timeoutMs,
+   316→                                                        `File read timed out after ${timeoutMs}ms`,
+   317→                                                );
+   318→                                                return {
+   319→                                                        query: formatReadFileQuery(request),
+   320→                                                        result: content,
+   321→                                                        success: true,
+   322→                                                };
+   323→                                        } catch (error) {
+   324→                                                const msg = formatError(error);
+   325→                                                return {
+   326→                                                        query: formatReadFileQuery(request),
+   327→                                                        result: "",
+   328→                                                        error: `Error reading file: ${msg}`,
+   329→                                                        success: false,
+   330→                                                };
+   331→                                        }
+   332→                                }),
+   333→                        );
+   334→                },
+   335→        });
+   336→}
+   337→
+   338→/**
+   339→ * Create the search_codebase tool
+   340→ *
+   341→ * Performs regex pattern searches across the codebase.
+   342→ */
+   343→export function createSearchTool(
+   344→        executor: SearchExecutor,
+   345→        config: Pick<DefaultToolsConfig, "cwd" | "searchTimeoutMs"> = {},
+   346→): AgentTool<SearchCodebaseInput, ToolOperationResult[]> {
+   347→        const timeoutMs = config.searchTimeoutMs ?? 30000;
+   348→        const cwd = config.cwd ?? process.cwd();
+   349→
+   350→        return createTool<SearchCodebaseInput, ToolOperationResult[]>({
+   351→                name: "search_codebase",
+   352→                description:
+   353→                        "Perform regex pattern searches across the codebase. " +
+   354→                        "Supports multiple parallel searches. When several search patterns could be useful and do not depend on each other, run them together in one call, and call this tool in the same response as other independent tool calls. " +
+   355→                        "Use for finding code patterns, function definitions, class names, imports, etc. " +
+   356→                        `Output beyond ~${Math.round(MAX_SEARCH_OUTPUT_CHARS / 1000)}k characters per query is middle-truncated; narrow patterns beat broad ones.`,
+   357→                inputSchema: zodToJsonSchema(SearchCodebaseInputSchema),
+   358→                timeoutMs: timeoutMs * 2,
+   359→                retryable: true,
+   360→                maxRetries: 1,
+   361→                execute: async (input, context) => {
+   362→                        // Validate input with Zod schema
+   363→                        const validate = validateWithZod(SearchCodebaseUnionInputSchema, input);
+   364→                        const queries = Array.isArray(validate)
+   365→                                ? validate
+   366→                                : typeof validate === "object"
+   367→                                        ? Array.isArray(validate.queries)
+   368→                                                ? validate.queries
+   369→                                                : [validate.queries]
+   370→                                        : [validate];
+   371→
+   372→                        return Promise.all(
+   373→                                queries.map(async (query): Promise<ToolOperationResult> => {
+   374→                                        try {
+   375→                                                const results = await withTimeout(
+   376→                                                        executor(query, cwd, context),
+   377→                                                        timeoutMs,
+   378→                                                        `Search timed out after ${timeoutMs}ms`,
+   379→                                                );
+   380→                                                return {
+   381→                                                        query,
+   382→                                                        result: results,
+   383→                                                        success: true,
+   384→                                                };
+   385→                                        } catch (error) {
+   386→                                                const msg = formatError(error);
+   387→                                                return {
+   388→                                                        query,
+   389→                                                        result: "",
+   390→                                                        error: `Search failed: ${msg}`,
+   391→                                                        success: false,
+   392→                                                };
+   393→                                        }
+   394→                                }),
+   395→                        );
+   396→                },
+   397→        });
+   398→}
+   399→
+   400→const RUN_COMMANDS_SHARED_INSTRUCTIONS =
+   401→        "Use for listing files, checking git status, running builds, executing tests, etc. " +
+   402→        "Commands must be non-interactive. Commands that require follow-up input like pagers should be skipped or used with supported flags/env (e.g. git --no-pager, --non-interactive) to bypass the interaction steps. ";
+   403→
+   404→/**
+   405→ * Build the run_commands tool description for the shell that will actually
+   406→ * execute the commands. The shell kind decides the syntax guidance (quoting,
+   407→ * sequencing, heredocs), and isWindows adds environment context for POSIX
+   408→ * shells running on a Windows host (e.g. Git Bash).
+   409→ */
+   410→export function buildRunCommandsDescription(
+   411→        shellKind: ShellKind,
+   412→        isWindows: boolean,
+   413→): string {
+   414→        if (shellKind === "powershell" || shellKind === "cmd") {
+   415→                const shellName = shellKind === "powershell" ? "PowerShell" : "cmd.exe";
+   416→                const sequencingOperator = shellKind === "powershell" ? "';'" : "'&&'";
+   417→                return (
+   418→                        "Run non-interactive shell commands from the root of the workspace in Windows environment. " +
+   419→                        RUN_COMMANDS_SHARED_INSTRUCTIONS +
+   420→                        `Output beyond ~${Math.round(MAX_COMMAND_OUTPUT_CHARS / 1000)}k characters is middle-truncated (start and end preserved); filter output when you need specific sections. ` +
+   421→                        `Commands run through ${shellName}; quote paths and arguments for ${shellName} and use ${sequencingOperator} to sequence commands. ` +
+   422→                        "Include multiple commands in the same call when they are independent and safe to run concurrently. When independent reads, searches, or edits are also needed, call those tools in the same response."
+   423→                );
+   424→        }
+   425→
+   426→        const environmentNote =
+   427→                shellKind === "wsl"
+   428→                        ? "Commands run through bash in WSL (wsl.exe); the Windows working directory is mounted under /mnt/<drive>. "
+   429→                        : isWindows
+   430→                                ? "Commands run through a POSIX (bash-compatible) shell on Windows. "
+   431→                                : "";
+   432→        return (
+   433→                "Run non-interactive shell commands from the root of the workspace. " +
+   434→                RUN_COMMANDS_SHARED_INSTRUCTIONS +
+   435→                environmentNote +
+   436→                "Commands should be properly shell-escaped and targeted to avoid error or timeout. Include multiple commands in the same call when they are independent complete shell commands and safe to run concurrently; multiline scripts and heredocs must be a single command string. When independent reads, searches, or edits are also needed, call those tools in the same response. " +
+   437→                `Output beyond ~${Math.round(MAX_COMMAND_OUTPUT_CHARS / 1000)}k characters is middle-truncated (start and end preserved); pipe through grep/head/tail when you need specific sections of large output. ` +
+   438→                "For long-running commands, run them in background and redirect output to a tmp file that you can read from later."
+   439→        );
+   440→}
+   441→
+   442→/**
+   443→ * Create the run_commands shell tool for the current platform.
+   444→ *
+   445→ * This preserves the SDK's platform-specific prompting/schema choices while
+   446→ * exposing a single generic shell-tool factory for host integrations. Pass
+   447→ * config.shell (matching the executor's shell) so the syntax guidance in the
+   448→ * tool description matches the shell that actually runs the commands.
+   449→ *
+   450→ * config.shell may be a provider function instead of a string. The runtime
+   451→ * reads `description` when building each model request, so a provider is
+   452→ * consulted at that boundary: a shell change made while the model is
+   453→ * generating does not affect the request in flight, and the next request
+   454→ * names the new shell. The provider must return the shell the executor will
+   455→ * use for tool calls issued by that next request.
+   456→ */
+   457→export function createShellTool(
+   458→        executor: ShellExecutor,
+   459→        config: Pick<DefaultToolsConfig, "cwd" | "bashTimeoutMs" | "telemetry"> & {
+   460→                shell?: string | (() => string);
+   461→        } = {},
+   462→): AgentTool<unknown, ToolOperationResult[]> {
+   463→        const timeoutMs = config.bashTimeoutMs ?? 30000;
+   464→        const timeoutSource =
+   465→                config.bashTimeoutMs === undefined
+   466→                        ? "default_setting"
+   467→                        : "configured_setting";
+   468→        const cwd = config.cwd ?? process.cwd();
+   469→        const isWindows = process.platform === "win32";
+   470→        const configShell = config.shell;
+   471→        const resolveShell =
+   472→                typeof configShell === "function"
+   473→                        ? configShell
+   474→                        : () => configShell ?? getDefaultShell(process.platform);
+   475→        const describe = () =>
+   476→                buildRunCommandsDescription(getShellKind(resolveShell()), isWindows);
+   477→
+   478→        const tool = createTool<unknown, ToolOperationResult[]>({
+   479→                name: "run_commands",
+   480→                description: describe(),
+   481→                inputSchema: zodToJsonSchema(RunCommandsInputSchema),
+   482→                timeoutMs: timeoutMs * 2,
+   483→                retryable: false,
+   484→                maxRetries: 0,
+   485→                execute: async (input, context) => {
+   486→                        const commands = coalesceAdjacentStringHeredocs(
+   487→                                normalizeRunCommandsInput(input),
+   488→                        );
+   489→
+   490→                        return executeShellCommands(commands, {
+   491→                                executor,
+   492→                                cwd,
+   493→                                context,
+   494→                                timeoutMs,
+   495→                                timeoutSource,
+   496→                                telemetry: config.telemetry,
+   497→                        });
+   498→                },
+   499→        });
+   500→
+   501→        if (typeof configShell === "function") {
+   502→                // The runtime rebuilds tool definitions from this property for every
+   503→                // model request, so a getter re-derives the description at exactly the
+   504→                // send-to-model boundary. AgentTool consumers only read `description`.
+   505→                Object.defineProperty(tool, "description", {
+   506→                        get: describe,
+   507→                        enumerable: true,
+   508→                });
+   509→        }
+   510→        return tool;
+   511→}
+   512→
+   513→/**
+   514→ * Create the fetch_web_content tool
+   515→ *
+   516→ * Fetches content from URLs and analyzes them using provided prompts.
+   517→ */
+   518→export function createWebFetchTool(
+   519→        executor: WebFetchExecutor,
+   520→        config: Pick<DefaultToolsConfig, "webFetchTimeoutMs"> = {},
+   521→): AgentTool<FetchWebContentInput, ToolOperationResult[]> {
+   522→        const timeoutMs = config.webFetchTimeoutMs ?? 30000;
+   523→
+   524→        return createTool<FetchWebContentInput, ToolOperationResult[]>({
+   525→                name: "fetch_web_content",
+   526→                description:
+   527→                        "Fetch content from URLs and analyze them using the provided prompts. " +
+   528→                        "Use for retrieving documentation, API references, or any web content. " +
+   529→                        "Each request includes a URL and a prompt describing what information to extract. Fetch independent URLs together in one call, and call this tool in the same response as other independent tool calls.",
+   530→                inputSchema: zodToJsonSchema(FetchWebContentInputSchema),
+   531→                timeoutMs: timeoutMs * 2,
+   532→                retryable: true,
+   533→                maxRetries: 2,
+   534→                execute: async (input, context) => {
+   535→                        // Validate input with Zod schema
+   536→                        const validatedInput = validateWithZod(FetchWebContentInputSchema, input);
+   537→
+   538→                        return Promise.all(
+   539→                                validatedInput.requests.map(
+   540→                                        async (request): Promise<ToolOperationResult> => {
+   541→                                                try {
+   542→                                                        const content = await withTimeout(
+   543→                                                                executor(request.url, request.prompt, context),
+   544→                                                                timeoutMs,
+   545→                                                                `Web fetch timed out after ${timeoutMs}ms`,
+   546→                                                        );
+   547→                                                        return {
+   548→                                                                query: request.url,
+   549→                                                                result: content,
+   550→                                                                success: true,
+   551→                                                        };
+   552→                                                } catch (error) {
+   553→                                                        const msg = formatError(error);
+   554→                                                        return {
+   555→                                                                query: request.url,
+   556→                                                                result: "",
+   557→                                                                error: `Error fetching web content: ${msg}`,
+   558→                                                                success: false,
+   559→                                                        };
+   560→                                                }
+   561→                                        },
+   562→                                ),
+   563→                        );
+   564→                },
+   565→        });
+   566→}
+   567→
+   568→const APPLY_PATCH_TOOL_DESC = `Use \`apply_patch\` to edit files with the canonical freeform patch grammar. Pass the patch text directly as the \`input\` string. Prefer the exact format below:
+   569→
+   570→*** Begin Patch
+   571→*** Update File: path/to/file.ts
+   572→@@ optional section marker
+   573→ [context before]
+   574→-[old line]
+   575→+[new line]
+   576→ [context after]
+   577→*** End Patch
+   578→
+   579→Supported actions:
+   580→- \`*** Add File: <path>\`
+   581→- \`*** Update File: <path>\`
+   582→- \`*** Delete File: <path>\`
+   583→- optional \`*** Move to: <new path>\` immediately after an Update File header
+   584→
+   585→Rules:
+   586→- In an Add File section, every file-content line must start with \`+\`.
+   587→- In an Update section, use context lines plus \`-\` and \`+\` lines to describe the change.
+   588→- Use \`@@\` markers when extra context is needed to disambiguate repeated code blocks.
+   589→- Do not use line numbers; this format is context-based.
+   590→- Prefer sending the patch body directly. Legacy shell wrappers such as \`%%bash\` and \`apply_patch <<"EOF"\` are accepted for compatibility but are not preferred.
+   591→
+   592→Example:
+   593→
+   594→*** Begin Patch
+   595→*** Update File: src/page.tsx
+   596→@@
+   597→   return (
+   598→     <div>
+   599→       <button onClick={() => console.log("clicked")}>Click me</button>
+   600→+      <button onClick={() => console.log("cancel clicked")}>Cancel</button>
+   601→     </div>
+   602→   );
+   603→ }
+   604→*** End Patch`;
+   605→
+   606→/**
+   607→ * Create the apply_patch tool
+   608→ *
+   609→ * Applies the canonical apply_patch format to one or more files.
+   610→ */
+   611→export function createApplyPatchTool(
+   612→        executor: ApplyPatchExecutor,
+   613→        config: Pick<DefaultToolsConfig, "cwd" | "applyPatchTimeoutMs"> = {},
+   614→): AgentTool<ApplyPatchInput, ToolOperationResult> {
+   615→        const timeoutMs = config.applyPatchTimeoutMs ?? 30000;
+   616→        const cwd = config.cwd ?? process.cwd();
+   617→
+   618→        return createTool<ApplyPatchInput, ToolOperationResult>({
+   619→                name: "apply_patch",
+   620→                description: APPLY_PATCH_TOOL_DESC,
+   621→                inputSchema: zodToJsonSchema(ApplyPatchInputSchema),
+   622→                timeoutMs,
+   623→                retryable: false,
+   624→                maxRetries: 0,
+   625→                execute: async (input, context) => {
+   626→                        const validate = validateWithZod(ApplyPatchInputUnionSchema, input);
+   627→                        const patchInput =
+   628→                                typeof validate === "string" ? validate : validate.input;
+   629→
+   630→                        try {
+   631→                                const result = await withTimeout(
+   632→                                        executor({ input: patchInput }, cwd, context),
+   633→                                        timeoutMs,
+   634→                                        `apply_patch timed out after ${timeoutMs}ms`,
+   635→                                );
+   636→
+   637→                                return {
+   638→                                        query: "apply_patch",
+   639→                                        result,
+   640→                                        success: true,
+   641→                                };
+   642→                        } catch (error) {
+   643→                                const msg = formatError(error);
+   644→                                return {
+   645→                                        query: "apply_patch",
+   646→                                        result: "",
+   647→                                        error: `apply_patch failed: ${msg}`,
+   648→                                        success: false,
+   649→                                };
+   650→                        }
+   651→                },
+   652→        });
+   653→}
+   654→
+   655→/**
+   656→ * Create the editor tool
+   657→ *
+   658→ * Supports controlled filesystem edits with create, replace, and insert commands.
+   659→ */
+   660→export function createEditorTool(
+   661→        executor: EditorExecutor,
+   662→        config: Pick<DefaultToolsConfig, "cwd" | "editorTimeoutMs"> = {},
+   663→): AgentTool<EditFileInput, ToolOperationResult> {
+   664→        const timeoutMs = config.editorTimeoutMs ?? 30000;
+   665→        const cwd = config.cwd ?? process.cwd();
+   666→
+   667→        return createTool<EditFileInput, ToolOperationResult>({
+   668→                name: "editor",
+   669→                description:
+   670→                        "An editor for controlled filesystem edits on the text file at the provided path. " +
+   671→                        "Provide `insert_line` to insert `new_text` at a specific line number. " +
+   672→                        "Otherwise, the tool replaces `old_text` with `new_text`, or creates the file with `new_text` if file does not exist. " +
+   673→                        "Use this tool for making small, precise edits to existing files or creating new files over shell commands. If several edits to different files or non-overlapping regions are already known, emit multiple editor tool calls in the same response instead of serializing them across turns.",
+   674→
+   675→                inputSchema: zodToJsonSchema(EditFileInputSchema),
+   676→                timeoutMs,
+   677→                retryable: false, // Editing operations are stateful and should not auto-retry
+   678→                maxRetries: 0,
+   679→                execute: async (input, context) => {
+   680→                        const validatedInput = validateWithZod(EditFileInputSchema, input);
+   681→                        const operation = validatedInput.insert_line == null ? "edit" : "insert";
+   682→                        const sizeError = getEditorSizeError(validatedInput);
+   683→
+   684→                        if (sizeError) {
+   685→                                return {
+   686→                                        query: `${operation}:${validatedInput.path}`,
+   687→                                        result: "",
+   688→                                        error: sizeError,
+   689→                                        success: false,
+   690→                                };
+   691→                        }
+   692→
+   693→                        try {
+   694→                                const result = await withTimeout(
+   695→                                        executor(validatedInput, cwd, context),
+   696→                                        timeoutMs,
+   697→                                        `Editor operation timed out after ${timeoutMs}ms`,
+   698→                                );
+   699→
+   700→                                return {
+   701→                                        query: `${operation}:${validatedInput.path}`,
+   702→                                        result,
+   703→                                        success: true,
+   704→                                };
+   705→                        } catch (error) {
+   706→                                const msg = formatError(error);
+   707→                                return {
+   708→                                        query: `${operation}:${validatedInput.path}`,
+   709→                                        result: "",
+   710→                                        error: `Editor operation failed: ${msg}`,
+   711→                                        success: false,
+   712→                                };
+   713→                        }
+   714→                },
+   715→        });
+   716→}
+   717→
+   718→/**
+   719→ * Create the skills tool
+   720→ *
+   721→ * Invokes a configured skill by name and optional arguments.
+   722→ */
+   723→export function createSkillsTool(
+   724→        executor: SkillsExecutorWithMetadata,
+   725→        config: Pick<DefaultToolsConfig, "skillsTimeoutMs"> = {},
+   726→): AgentTool<SkillsInput, string> {
+   727→        const timeoutMs = config.skillsTimeoutMs ?? 15000;
+   728→
+   729→        const baseDescription =
+   730→                "Execute a skill within the main conversation. " +
+   731→                "When users ask you to perform tasks, check if any available skills match. " +
+   732→                "When users reference a slash command, invoke it with this tool. " +
+   733→                'Input: `skill` (required) and optional `args`. Example: `skill: "pdf"`, `skill: "commit", args: "-m \\"Fix bug\\""`, `skill: "review-pr", args: "123"`, `skill: "ms-office-suite:pdf"`. ' +
+   734→                "When a skill matches the user's request, invoking this tool is a blocking requirement before any other response. " +
+   735→                "Never mention a skill without invoking this tool.";
+   736→
+   737→        const tool = createTool<SkillsInput, string>({
+   738→                name: "skills",
+   739→                description: baseDescription,
+   740→                inputSchema: zodToJsonSchema(SkillsInputSchema),
+   741→                timeoutMs,
+   742→                retryable: false,
+   743→                maxRetries: 0,
+   744→                execute: async (input, context) => {
+   745→                        const validatedInput = validateWithZod(SkillsInputSchema, input);
+   746→                        return withTimeout(
+   747→                                executor(
+   748→                                        validatedInput.skill,
+   749→                                        validatedInput.args || undefined,
+   750→                                        context,
+   751→                                ),
+   752→                                timeoutMs,
+   753→                                `Skills operation timed out after ${timeoutMs}ms`,
+   754→                        );
+   755→                },
+   756→        });
+   757→
+   758→        Object.defineProperty(tool, "description", {
+   759→                get() {
+   760→                        const skills = executor.configuredSkills
+   761→                                ?.filter((s) => !s.disabled)
+   762→                                .map((s) => s.name);
+   763→                        if (skills && skills.length > 0) {
+   764→                                return `${baseDescription} Available skills: ${skills.join(", ")}.`;
+   765→                        }
+   766→                        return baseDescription;
+   767→                },
+   768→                enumerable: true,
+   769→                configurable: true,
+   770→        });
+   771→
+   772→        return tool;
+   773→}
+   774→
+   775→/**
+   776→ * Create the ask_question tool
+   777→ *
+   778→ * Asks the user a single clarifying question with 2-5 selectable options.
+   779→ */
+   780→export function createAskQuestionTool(
+   781→        executor: AskQuestionExecutor,
+   782→): AgentTool<AskQuestionInput, string> {
+   783→        return {
+   784→                name: "ask_question",
+   785→                description:
+   786→                        "Ask user a question for clarifying or gathering information needed to complete the task. " +
+   787→                        "For example, ask the user clarifying questions about a key implementation decision. " +
+   788→                        "You should only ask one question. " +
+   789→                        "Provide an array of 2-5 options for the user to choose from. " +
+   790→                        "Never include an option to toggle to Act mode.",
+   791→                inputSchema: zodToJsonSchema(AskQuestionInputSchema),
+   792→                retryable: false,
+   793→                maxRetries: 0,
+   794→                execute: async (input, context) => {
+   795→                        const validatedInput = validateWithZod(AskQuestionInputSchema, input);
+   796→                        return executor(validatedInput.question, validatedInput.options, context);
+   797→                },
+   798→        };
+   799→}
+   800→
+   801→export function createSubmitAndExitTool(
+   802→        executor: VerifySubmitExecutor,
+   803→        config: Pick<DefaultToolsConfig, "submitTimeoutMs"> = {},
+   804→): AgentTool<SubmitInput, string> {
+   805→        const timeoutMs = config.submitTimeoutMs ?? 15000;
+   806→
+   807→        return createTool<SubmitInput, string>({
+   808→                name: "submit_and_exit",
+   809→                description:
+   810→                        "Submit the final answer and exit the conversation. " +
+   811→                        "For example, submit a summary of the investigation and confirm the issue is resolved. " +
+   812→                        "You should only submit once all necessary steps are completed. " +
+   813→                        "Make sure to verify your output matches the expected format, data types, and file locations specified. " +
+   814→                        "Provide a summary of the investigation and confirm the issue is resolved.",
+   815→                inputSchema: zodToJsonSchema(SubmitInputSchema),
+   816→                lifecycle: {
+   817→                        completesRun: true,
+   818→                },
+   819→                timeoutMs,
+   820→                retryable: false,
+   821→                maxRetries: 0,
+   822→                execute: async (input, context) => {
+   823→                        const validatedInput = validateWithZod(SubmitInputSchema, input);
+   824→                        return withTimeout(
+   825→                                executor(validatedInput.summary, validatedInput.verified, context),
+   826→                                timeoutMs,
+   827→                                `submit_and_exit timed out after ${timeoutMs}ms`,
+   828→                        );
+   829→                },
+   830→        });
+   831→}
+   832→
+   833→// =============================================================================
+   834→// Default Tools Factory
+   835→// =============================================================================
+   836→
+   837→/**
+   838→ * Create a set of default tools for an agent
+   839→ *
+   840→ * This function creates the default tools based on the provided configuration
+   841→ * and executors. Only tools that are enabled AND have an executor provided
+   842→ * will be included in the returned array.
+   843→ *
+   844→ * @example
+   845→ * ```typescript
+   846→ * import { Agent, createDefaultTools } from "@cline/core"
+   847→ * import * as fs from "fs/promises"
+   848→ * import { exec } from "child_process"
+   849→ *
+   850→ * const tools = createDefaultTools({
+   851→ *   executors: {
+   852→ *     readFile: async ({ path }) => fs.readFile(path, "utf-8"),
+   853→ *     bash: async (cmd, cwd) => {
+   854→ *       return new Promise((resolve, reject) => {
+   855→ *         exec(cmd, { cwd }, (err, stdout, stderr) => {
+   856→ *           if (err) reject(new Error(stderr || err.message))
+   857→ *           else resolve(stdout)
+   858→ *         })
+   859→ *       })
+   860→ *     },
+   861→ *   },
+   862→ *   enableReadFiles: true,
+   863→ *   enableBash: true,
+   864→ *   enableSearch: false, // Disabled
+   865→ *   enableWebFetch: false, // Disabled
+   866→ *   cwd: "/path/to/project",
+   867→ * })
+   868→ *
+   869→ * const agent = new Agent({
+   870→ *   // ... provider config
+   871→ *   tools,
+   872→ * })
+   873→ * ```
+   874→ */
+   875→export function createDefaultTools(
+   876→        options: CreateDefaultToolsOptions,
+   877→): AgentTool[] {
+   878→        const {
+   879→                executors,
+   880→                enableReadFiles = true,
+   881→                enableSearch = true,
+   882→                enableBash = true,
+   883→                enableWebFetch = true,
+   884→                enableApplyPatch = false,
+   885→                enableEditor = true,
+   886→                enableSkills = true,
+   887→                enableAskQuestion = true,
+   888→                enableSubmitAndExit = false,
+   889→                ...config
+   890→        } = options;
+   891→
+   892→        const tools: AgentTool<never, unknown>[] = [];
+   893→
+   894→        // Add read_files tool if enabled and executor provided
+   895→        if (enableReadFiles && executors.readFile) {
+   896→                tools.push(createReadFilesTool(executors.readFile, config));
+   897→        }
+   898→
+   899→        // Add search_codebase tool if enabled and executor provided
+   900→        if (enableSearch && executors.search) {
+   901→                tools.push(createSearchTool(executors.search, config));
+   902→        }
+   903→
+   904→        // Add run_commands tool if enabled and executor provided
+   905→        if (enableBash && executors.bash) {
+   906→                tools.push(createShellTool(executors.bash, config));
+   907→        }
+   908→
+   909→        // Add fetch_web_content tool if enabled and executor provided
+   910→        if (enableWebFetch && executors.webFetch) {
+   911→                tools.push(createWebFetchTool(executors.webFetch, config));
+   912→        }
+   913→
+   914→        // Add editor tool if enabled and executor provided,
+   915→        // else check if apply_patch tool is enabled and executor provided
+   916→        // NOTE: Do not enable two similar tools at the same time.
+   917→        if (enableEditor && executors.editor) {
+   918→                tools.push(createEditorTool(executors.editor, config));
+   919→        } else if (enableApplyPatch && executors.applyPatch) {
+   920→                tools.push(createApplyPatchTool(executors.applyPatch, config));
+   921→        }
+   922→
+   923→        // Add skills tool if enabled and executor provided
+   924→        if (enableSkills && executors.skills) {
+   925→                tools.push(createSkillsTool(executors.skills, config));
+   926→        }
+   927→
+   928→        const submitExecutor = enableSubmitAndExit ? executors.submit : undefined;
+   929→
+   930→        // Add ask_question tool if enabled and executor provided
+   931→        if (enableAskQuestion && executors.askQuestion && !submitExecutor) {
+   932→                tools.push(createAskQuestionTool(executors.askQuestion));
+   933→        }
+   934→
+   935→        // Add submit_and_exit tool if enabled and executor provided
+   936→        if (submitExecutor) {
+   937→                tools.push(createSubmitAndExitTool(submitExecutor, config));
+   938→        }
+   939→
+   940→        return tools as unknown as AgentTool[];
+   941→}
+   942→

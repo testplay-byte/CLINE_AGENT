@@ -1,0 +1,712 @@
+     1→import type {
+     2→        BasicLogger,
+     3→        ContentBlock,
+     4→        MessageWithMetadata,
+     5→} from "@cline/shared";
+     6→import { getUserRunSpan } from "../../session/user-run-messages";
+     7→import type {
+     8→        CoreCompactionContext,
+     9→        CoreCompactionResult,
+    10→} from "../../types/config";
+    11→import { buildBudgetProjection } from "./budget-projection";
+    12→import {
+    13→        type EstimateMessageTokens,
+    14→        formatToolActivitySummary,
+    15→        hasToolActivity,
+    16→        isTurnStartMessage,
+    17→        summarizeToolActivity,
+    18→        type ToolActivitySummary,
+    19→} from "./compaction-shared";
+    20→
+    21→function getTotalTokens(
+    22→        messages: MessageWithMetadata[],
+    23→        estimateMessageTokens: EstimateMessageTokens,
+    24→): number {
+    25→        return messages.reduce(
+    26→                (total, message) => total + estimateMessageTokens(message),
+    27→                0,
+    28→        );
+    29→}
+    30→
+    31→function sanitizeTypedUserMessage(
+    32→        message: MessageWithMetadata,
+    33→): MessageWithMetadata | undefined {
+    34→        if (typeof message.content === "string") {
+    35→                const text = message.content.trim();
+    36→                return text ? { ...message, content: text } : undefined;
+    37→        }
+    38→        const kept = message.content.filter(
+    39→                (block) => block.type !== "text" || block.text.trim(),
+    40→        );
+    41→        if (kept.length === 0) {
+    42→                return undefined;
+    43→        }
+    44→        return {
+    45→                ...message,
+    46→                content: kept.map((block) =>
+    47→                        block.type === "text" ? { ...block, text: block.text.trim() } : block,
+    48→                ),
+    49→        };
+    50→}
+    51→
+    52→function haveMessagesChanged(
+    53→        original: MessageWithMetadata[],
+    54→        next: MessageWithMetadata[],
+    55→): boolean {
+    56→        return JSON.stringify(original) !== JSON.stringify(next);
+    57→}
+    58→
+    59→/** How many of the conversation's most recent assistant text contents
+    60→ * survive verbatim inside the dropped-work summaries. */
+    61→const PRESERVED_ASSISTANT_TEXT_COUNT = 3;
+    62→
+    63→function assistantTextContent(
+    64→        message: MessageWithMetadata,
+    65→): string | undefined {
+    66→        if (message.role !== "assistant") {
+    67→                return undefined;
+    68→        }
+    69→        if (typeof message.content === "string") {
+    70→                const text = message.content.trim();
+    71→                return text || undefined;
+    72→        }
+    73→        const text = message.content
+    74→                .filter((block) => block.type === "text")
+    75→                .map((block) => block.text.trim())
+    76→                .filter(Boolean)
+    77→                .join("\n");
+    78→        return text || undefined;
+    79→}
+    80→
+    81→function buildDroppedWorkSummaryBlock(
+    82→        summary: ToolActivitySummary,
+    83→        preservedResponses: string[],
+    84→): ContentBlock {
+    85→        const responsesSection =
+    86→                preservedResponses.length > 0
+    87→                        ? `\n\nYour recent responses:\n${preservedResponses.join("\n---\n")}`
+    88→                        : "";
+    89→        return {
+    90→                type: "text",
+    91→                text: `<SYSTEM_NOTICE>\nEarlier context was compacted. Summary of your actions after the request above:\n${formatToolActivitySummary(summary)}${responsesSection}</SYSTEM_NOTICE>`,
+    92→        };
+    93→}
+    94→
+    95→function userContentBlocks(
+    96→        message: MessageWithMetadata,
+    97→        keepAttachments: boolean,
+    98→): ContentBlock[] {
+    99→        if (typeof message.content === "string") {
+   100→                return message.content.trim()
+   101→                        ? [{ type: "text", text: message.content }]
+   102→                        : [];
+   103→        }
+   104→        if (keepAttachments) {
+   105→                return [...message.content];
+   106→        }
+   107→        // Attached files and images are stale context bloat once the turn is
+   108→        // old enough to compact; the dropped-work summaries carry file paths.
+   109→        // Only the latest typed prompt keeps its attachments — they may be
+   110→        // load-bearing for the active request.
+   111→        return message.content.filter(
+   112→                (block) => block.type !== "file" && block.type !== "image",
+   113→        );
+   114→}
+   115→
+   116→/**
+   117→ * Collapse runs of adjacent typed user messages — left behind when the
+   118→ * assistant turns between them were removed — into a single user message.
+   119→ * Each gap is bridged with a summary of the tool work that was dropped
+   120→ * there, resolved by message id against the original transcript. Work
+   121→ * dropped after a typed user message with no surviving messages in
+   122→ * between (e.g. the current turn's tool calls) gets a trailing summary
+   123→ * appended to that message.
+   124→ */
+   125→function mergeAdjacentUserTurns(
+   126→        messages: MessageWithMetadata[],
+   127→        originalMessages: MessageWithMetadata[],
+   128→): MessageWithMetadata[] {
+   129→        const originalIndexById = new Map<string, number>();
+   130→        originalMessages.forEach((message, index) => {
+   131→                if (message.id) {
+   132→                        originalIndexById.set(message.id, index);
+   133→                }
+   134→        });
+   135→        const resolveOriginalIndex = (
+   136→                message: MessageWithMetadata,
+   137→        ): number | undefined =>
+   138→                message.id ? originalIndexById.get(message.id) : undefined;
+   139→
+   140→        // The conversation's most recent assistant text contents survive
+   141→        // verbatim inside the summary block covering the span they were
+   142→        // dropped from.
+   143→        const preservedTextIndices = new Set<number>();
+   144→        for (
+   145→                let scan = originalMessages.length - 1;
+   146→                scan >= 0 && preservedTextIndices.size < PRESERVED_ASSISTANT_TEXT_COUNT;
+   147→                scan -= 1
+   148→        ) {
+   149→                if (assistantTextContent(originalMessages[scan])) {
+   150→                        preservedTextIndices.add(scan);
+   151→                }
+   152→        }
+   153→        const collectPreservedResponses = (start: number, end: number): string[] => {
+   154→                const responses: string[] = [];
+   155→                for (let position = start; position < end; position += 1) {
+   156→                        if (!preservedTextIndices.has(position)) {
+   157→                                continue;
+   158→                        }
+   159→                        const text = assistantTextContent(originalMessages[position]);
+   160→                        if (text) {
+   161→                                responses.push(text);
+   162→                        }
+   163→                }
+   164→                return responses;
+   165→        };
+   166→
+   167→        interface MergedEntry {
+   168→                message: MessageWithMetadata;
+   169→                firstOriginalIndex: number | undefined;
+   170→                lastOriginalIndex: number | undefined;
+   171→                isTypedUser: boolean;
+   172→        }
+   173→
+   174→        let latestTypedIndex = -1;
+   175→        for (let scan = messages.length - 1; scan >= 0; scan -= 1) {
+   176→                if (isTurnStartMessage(messages[scan])) {
+   177→                        latestTypedIndex = scan;
+   178→                        break;
+   179→                }
+   180→        }
+   181→
+   182→        const entries: MergedEntry[] = [];
+   183→        let index = 0;
+   184→        while (index < messages.length) {
+   185→                if (!isTurnStartMessage(messages[index])) {
+   186→                        const originalIndex = resolveOriginalIndex(messages[index]);
+   187→                        entries.push({
+   188→                                message: messages[index],
+   189→                                firstOriginalIndex: originalIndex,
+   190→                                lastOriginalIndex: originalIndex,
+   191→                                isTypedUser: false,
+   192→                        });
+   193→                        index += 1;
+   194→                        continue;
+   195→                }
+   196→                let runEnd = index;
+   197→                while (
+   198→                        runEnd + 1 < messages.length &&
+   199→                        isTurnStartMessage(messages[runEnd + 1])
+   200→                ) {
+   201→                        runEnd += 1;
+   202→                }
+   203→                let message = messages[index];
+   204→                if (runEnd > index) {
+   205→                        const blocks: ContentBlock[] = [];
+   206→                        let userRunSpan = 0;
+   207→                        for (let member = index; member <= runEnd; member += 1) {
+   208→                                userRunSpan += getUserRunSpan(messages[member]);
+   209→                                if (member > index) {
+   210→                                        const previousIndex = resolveOriginalIndex(messages[member - 1]);
+   211→                                        const currentIndex = resolveOriginalIndex(messages[member]);
+   212→                                        if (
+   213→                                                previousIndex !== undefined &&
+   214→                                                currentIndex !== undefined &&
+   215→                                                currentIndex > previousIndex + 1
+   216→                                        ) {
+   217→                                                const summary = summarizeToolActivity(
+   218→                                                        originalMessages.slice(previousIndex + 1, currentIndex),
+   219→                                                );
+   220→                                                const responses = collectPreservedResponses(
+   221→                                                        previousIndex + 1,
+   222→                                                        currentIndex,
+   223→                                                );
+   224→                                                if (hasToolActivity(summary) || responses.length > 0) {
+   225→                                                        blocks.push(buildDroppedWorkSummaryBlock(summary, responses));
+   226→                                                }
+   227→                                        }
+   228→                                }
+   229→                                blocks.push(
+   230→                                        ...userContentBlocks(messages[member], member === latestTypedIndex),
+   231→                                );
+   232→                        }
+   233→                        message = {
+   234→                                ...messages[index],
+   235→                                content: blocks,
+   236→                                metadata: {
+   237→                                        ...messages[index].metadata,
+   238→                                        userRunSpan,
+   239→                                },
+   240→                        };
+   241→                } else {
+   242→                        const blocks = userContentBlocks(message, index === latestTypedIndex);
+   243→                        if (
+   244→                                Array.isArray(message.content) &&
+   245→                                blocks.length !== message.content.length
+   246→                        ) {
+   247→                                message = { ...message, content: blocks };
+   248→                        }
+   249→                }
+   250→                entries.push({
+   251→                        message,
+   252→                        firstOriginalIndex: resolveOriginalIndex(messages[index]),
+   253→                        lastOriginalIndex: resolveOriginalIndex(messages[runEnd]),
+   254→                        isTypedUser: true,
+   255→                });
+   256→                index = runEnd + 1;
+   257→        }
+   258→
+   259→        // Trailing gaps: dropped work between a typed user message and the next
+   260→        // surviving message (or the end of the transcript) is summarized into
+   261→        // that user message so the model keeps a trace of its own actions.
+   262→        for (let entry = 0; entry < entries.length; entry += 1) {
+   263→                const current = entries[entry];
+   264→                if (!current.isTypedUser || current.lastOriginalIndex === undefined) {
+   265→                        continue;
+   266→                }
+   267→                const next = entries[entry + 1];
+   268→                const gapEnd = next ? next.firstOriginalIndex : originalMessages.length;
+   269→                if (gapEnd === undefined || gapEnd <= current.lastOriginalIndex + 1) {
+   270→                        continue;
+   271→                }
+   272→                const summary = summarizeToolActivity(
+   273→                        originalMessages.slice(current.lastOriginalIndex + 1, gapEnd),
+   274→                );
+   275→                const responses = collectPreservedResponses(
+   276→                        current.lastOriginalIndex + 1,
+   277→                        gapEnd,
+   278→                );
+   279→                if (!hasToolActivity(summary) && responses.length === 0) {
+   280→                        continue;
+   281→                }
+   282→                current.message = {
+   283→                        ...current.message,
+   284→                        content: [
+   285→                                ...userContentBlocks(current.message, true),
+   286→                                buildDroppedWorkSummaryBlock(summary, responses),
+   287→                        ],
+   288→                };
+   289→        }
+   290→        return entries.map((entry) => entry.message);
+   291→}
+   292→
+   293→/**
+   294→ * Per-message token metrics describe the request context at the time the
+   295→ * message was produced; after compaction rewrites the transcript they no
+   296→ * longer add up, so they are dropped from the compacted result.
+   297→ */
+   298→function stripStaleMetrics(message: MessageWithMetadata): MessageWithMetadata {
+   299→        if (!message.metrics) {
+   300→                return message;
+   301→        }
+   302→        const { metrics: _metrics, ...rest } = message;
+   303→        return rest;
+   304→}
+   305→
+   306→interface AggregatedUsage {
+   307→        inputTokens: number;
+   308→        outputTokens: number;
+   309→        cacheReadTokens: number;
+   310→        cacheWriteTokens: number;
+   311→        cost: number;
+   312→}
+   313→
+   314→/**
+   315→ * Sum the per-message usage metrics that compaction is about to strip, so
+   316→ * the aggregate survives on the compaction message's metadata.
+   317→ */
+   318→function aggregateUsageMetrics(
+   319→        messages: MessageWithMetadata[],
+   320→): AggregatedUsage | undefined {
+   321→        let found = false;
+   322→        const totals = {
+   323→                inputTokens: 0,
+   324→                outputTokens: 0,
+   325→                cacheReadTokens: 0,
+   326→                cacheWriteTokens: 0,
+   327→                cost: 0,
+   328→        };
+   329→        for (const message of messages) {
+   330→                const metrics = message.metrics;
+   331→                if (!metrics) {
+   332→                        continue;
+   333→                }
+   334→                found = true;
+   335→                totals.inputTokens += metrics.inputTokens ?? 0;
+   336→                totals.outputTokens += metrics.outputTokens ?? 0;
+   337→                totals.cacheReadTokens += metrics.cacheReadTokens ?? 0;
+   338→                totals.cacheWriteTokens += metrics.cacheWriteTokens ?? 0;
+   339→                totals.cost += metrics.cost ?? 0;
+   340→        }
+   341→        return found ? totals : undefined;
+   342→}
+   343→
+   344→function addAggregatedUsage(
+   345→        first: AggregatedUsage | undefined,
+   346→        second: AggregatedUsage | undefined,
+   347→): AggregatedUsage | undefined {
+   348→        if (!first) {
+   349→                return second;
+   350→        }
+   351→        if (!second) {
+   352→                return first;
+   353→        }
+   354→        return {
+   355→                inputTokens: first.inputTokens + second.inputTokens,
+   356→                outputTokens: first.outputTokens + second.outputTokens,
+   357→                cacheReadTokens: first.cacheReadTokens + second.cacheReadTokens,
+   358→                cacheWriteTokens: first.cacheWriteTokens + second.cacheWriteTokens,
+   359→                cost: first.cost + second.cost,
+   360→        };
+   361→}
+   362→
+   363→/**
+   364→ * Compaction stats accumulate across repeated compactions: the folded
+   365→ * first message carries the running totals, and each new pass adds only
+   366→ * what it removed this time.
+   367→ */
+   368→function readPriorCompactionStats(message: MessageWithMetadata | undefined): {
+   369→        messagesRemoved: number;
+   370→        usageBefore: AggregatedUsage | undefined;
+   371→} {
+   372→        const metadata = message?.metadata as Record<string, unknown> | undefined;
+   373→        if (!metadata || metadata.kind !== "compaction") {
+   374→                return { messagesRemoved: 0, usageBefore: undefined };
+   375→        }
+   376→        const usage = metadata.usageBefore as Partial<AggregatedUsage> | undefined;
+   377→        return {
+   378→                messagesRemoved:
+   379→                        typeof metadata.messagesRemoved === "number"
+   380→                                ? metadata.messagesRemoved
+   381→                                : 0,
+   382→                usageBefore:
+   383→                        usage && typeof usage === "object"
+   384→                                ? {
+   385→                                                inputTokens: usage.inputTokens ?? 0,
+   386→                                                outputTokens: usage.outputTokens ?? 0,
+   387→                                                cacheReadTokens: usage.cacheReadTokens ?? 0,
+   388→                                                cacheWriteTokens: usage.cacheWriteTokens ?? 0,
+   389→                                                cost: usage.cost ?? 0,
+   390→                                        }
+   391→                                : undefined,
+   392→        };
+   393→}
+   394→
+   395→const COMPACTION_PRESERVED_MARKER = "preserved";
+   396→
+   397→/**
+   398→ * Messages that survived an earlier compaction are frozen: a later
+   399→ * compaction never re-folds them, so repeated compactions only process
+   400→ * the messages added since. Without this, each pass would re-drop the
+   401→ * previously preserved answers and stack duplicate summary blocks onto
+   402→ * the already-folded prompts.
+   403→ */
+   404→function isPreservedByCompaction(message: MessageWithMetadata): boolean {
+   405→        return (
+   406→                (message.metadata as { compaction?: string } | undefined)?.compaction ===
+   407→                COMPACTION_PRESERVED_MARKER
+   408→        );
+   409→}
+   410→
+   411→function markPreservedByCompaction(
+   412→        message: MessageWithMetadata,
+   413→): MessageWithMetadata {
+   414→        if (isPreservedByCompaction(message)) {
+   415→                return message;
+   416→        }
+   417→        return {
+   418→                ...message,
+   419→                metadata: { ...message.metadata, compaction: COMPACTION_PRESERVED_MARKER },
+   420→        };
+   421→}
+   422→
+   423→/**
+   424→ * The concluding assistant answer of an older turn is kept as archive:
+   425→ * thinking blocks carry no value there and are dropped. Returns undefined
+   426→ * when nothing text-bearing remains.
+   427→ */
+   428→function sanitizeOlderAssistantFinal(
+   429→        message: MessageWithMetadata,
+   430→): MessageWithMetadata | undefined {
+   431→        if (typeof message.content === "string") {
+   432→                return message.content.trim() ? message : undefined;
+   433→        }
+   434→        const kept = message.content.filter(
+   435→                (block) => block.type !== "thinking" && block.type !== "redacted_thinking",
+   436→        );
+   437→        if (!kept.some((block) => block.type === "text" && block.text.trim())) {
+   438→                return undefined;
+   439→        }
+   440→        return { ...message, content: kept };
+   441→}
+   442→
+   443→/**
+   444→ * Fold the conversation history without a summarizer model. Typed user
+   445→ * prompts always survive. The latest typed turn keeps its newest messages
+   446→ * verbatim within the token target, dropping only the oldest ones (the
+   447→ * kept suffix starts at an assistant message so no tool pair is split).
+   448→ * Older turns keep their concluding assistant answer when it fits, newest
+   449→ * turns first. Everything else is dropped and re-surfaced as dropped-work
+   450→ * summaries attached to the surviving prompts.
+   451→ */
+   452→export function runBasicCompaction(options: {
+   453→        context: CoreCompactionContext;
+   454→        estimateMessageTokens: EstimateMessageTokens;
+   455→        logger?: BasicLogger;
+   456→}): CoreCompactionResult | undefined {
+   457→        const originalMessages = options.context.messages;
+   458→        const estimate = options.estimateMessageTokens;
+   459→        // A lone message has nothing to compact around it; truncating the only
+   460→        // prompt would just corrupt the active request.
+   461→        if (originalMessages.length < 2) {
+   462→                return undefined;
+   463→        }
+   464→        const totalTargetTokens = Math.max(
+   465→                1,
+   466→                Math.min(
+   467→                        options.context.budget.messages.targetTokens,
+   468→                        options.context.budget.messages.triggerTokens,
+   469→                ),
+   470→        );
+   471→
+   472→        const typedIndices: number[] = [];
+   473→        for (let index = 0; index < originalMessages.length; index += 1) {
+   474→                if (isTurnStartMessage(originalMessages[index])) {
+   475→                        typedIndices.push(index);
+   476→                }
+   477→        }
+   478→        const sanitizedTypedByIndex = new Map<number, MessageWithMetadata>();
+   479→        for (const index of typedIndices) {
+   480→                const sanitized = sanitizeTypedUserMessage(originalMessages[index]);
+   481→                if (sanitized) {
+   482→                        sanitizedTypedByIndex.set(index, sanitized);
+   483→                }
+   484→        }
+   485→        if (sanitizedTypedByIndex.size === 0) {
+   486→                return undefined;
+   487→        }
+   488→        const latestTypedOriginalIndex = typedIndices[typedIndices.length - 1];
+   489→
+   490→        // Typed prompts are mandatory; budget them at their post-merge shape
+   491→        // (attachments survive only on the latest prompt).
+   492→        let totalTokens = 0;
+   493→        for (const [index, sanitized] of sanitizedTypedByIndex) {
+   494→                totalTokens += estimate({
+   495→                        ...sanitized,
+   496→                        content: userContentBlocks(sanitized, index === latestTypedOriginalIndex),
+   497→                });
+   498→        }
+   499→
+   500→        // Output of an earlier compaction is frozen: those messages are kept
+   501→        // as-is and never re-folded, so this pass only processes new messages.
+   502→        const frozenIndices = new Set<number>();
+   503→        for (let index = 0; index < originalMessages.length; index += 1) {
+   504→                if (sanitizedTypedByIndex.has(index)) {
+   505→                        continue;
+   506→                }
+   507→                if (isPreservedByCompaction(originalMessages[index])) {
+   508→                        frozenIndices.add(index);
+   509→                        totalTokens += estimate(originalMessages[index]);
+   510→                }
+   511→        }
+   512→
+   513→        // Latest typed turn: preserve the newest messages that fit, dropping
+   514→        // only the oldest. Snapping the kept suffix forward to an assistant
+   515→        // message keeps tool pairs intact (a tool_use holds its result in the
+   516→        // user message that follows it).
+   517→        const keptExtraIndices = new Set<number>();
+   518→        {
+   519→                let start = originalMessages.length;
+   520→                let accumulated = 0;
+   521→                for (
+   522→                        let index = originalMessages.length - 1;
+   523→                        index > latestTypedOriginalIndex;
+   524→                        index -= 1
+   525→                ) {
+   526→                        // Reaching frozen messages means the rest is a previous
+   527→                        // compaction's output — already kept, nothing left to walk.
+   528→                        if (frozenIndices.has(index)) {
+   529→                                break;
+   530→                        }
+   531→                        const cost = estimate(originalMessages[index]);
+   532→                        if (totalTokens + accumulated + cost > totalTargetTokens) {
+   533→                                break;
+   534→                        }
+   535→                        accumulated += cost;
+   536→                        start = index;
+   537→                }
+   538→                while (
+   539→                        start < originalMessages.length &&
+   540→                        originalMessages[start].role !== "assistant"
+   541→                ) {
+   542→                        start += 1;
+   543→                }
+   544→                for (let index = start; index < originalMessages.length; index += 1) {
+   545→                        keptExtraIndices.add(index);
+   546→                        totalTokens += estimate(originalMessages[index]);
+   547→                }
+   548→        }
+   549→
+   550→        // Older typed turns: keep each turn's concluding assistant answer when
+   551→        // it fits, newest turns first.
+   552→        const olderFinalByIndex = new Map<number, MessageWithMetadata>();
+   553→        for (let block = typedIndices.length - 2; block >= 0; block -= 1) {
+   554→                const blockStart = typedIndices[block] + 1;
+   555→                const blockEnd = typedIndices[block + 1];
+   556→                for (let index = blockEnd - 1; index >= blockStart; index -= 1) {
+   557→                        const candidate = originalMessages[index];
+   558→                        // A frozen answer from an earlier compaction already covers this
+   559→                        // turn.
+   560→                        if (frozenIndices.has(index)) {
+   561→                                break;
+   562→                        }
+   563→                        if (candidate.role !== "assistant") {
+   564→                                continue;
+   565→                        }
+   566→                        // An assistant message with a tool_use cannot stand alone (its
+   567→                        // result is dropped); look further back for the turn's answer.
+   568→                        if (
+   569→                                Array.isArray(candidate.content) &&
+   570→                                candidate.content.some((b) => b.type === "tool_use")
+   571→                        ) {
+   572→                                continue;
+   573→                        }
+   574→                        const preserved = sanitizeOlderAssistantFinal(candidate);
+   575→                        if (preserved) {
+   576→                                const cost = estimate(preserved);
+   577→                                if (totalTokens + cost <= totalTargetTokens) {
+   578→                                        olderFinalByIndex.set(index, preserved);
+   579→                                        totalTokens += cost;
+   580→                                }
+   581→                        }
+   582→                        break;
+   583→                }
+   584→        }
+   585→
+   586→        const keptMessages: MessageWithMetadata[] = [];
+   587→        for (let index = 0; index < originalMessages.length; index += 1) {
+   588→                const typed = sanitizedTypedByIndex.get(index);
+   589→                if (typed) {
+   590→                        keptMessages.push(typed);
+   591→                        continue;
+   592→                }
+   593→                if (frozenIndices.has(index) || keptExtraIndices.has(index)) {
+   594→                        keptMessages.push(originalMessages[index]);
+   595→                        continue;
+   596→                }
+   597→                const olderFinal = olderFinalByIndex.get(index);
+   598→                if (olderFinal) {
+   599→                        keptMessages.push(olderFinal);
+   600→                }
+   601→        }
+   602→        const beforeTokens = getTotalTokens(
+   603→                originalMessages,
+   604→                options.estimateMessageTokens,
+   605→        );
+   606→        // Safety valve for estimator drift. The floor is whatever the selection
+   607→        // deliberately kept: typed prompts and frozen output of earlier
+   608→        // compactions must not be trimmed to chase a target that is already
+   609→        // below their size (e.g. a repeated manual compaction halving its
+   610→        // target each run). The trigger stays a hard ceiling — content that
+   611→        // cannot fit the window at all is still trimmed best-effort.
+   612→        const projectionTargetTokens = Math.min(
+   613→                Math.max(totalTargetTokens, totalTokens),
+   614→                Math.max(1, options.context.budget.messages.triggerTokens),
+   615→        );
+   616→        const budgeted = buildBudgetProjection({
+   617→                messages: keptMessages,
+   618→                targetTokens: projectionTargetTokens,
+   619→                policyIntent: "basic_compaction_projection",
+   620→                estimateMessageTokens: options.estimateMessageTokens,
+   621→        });
+   622→        if (budgeted.status === "failed") {
+   623→                options.logger?.debug("Basic compaction returned best-effort projection", {
+   624→                        budgetWarnings: budgeted.warnings.map((warning) => warning.code),
+   625→                        projectedTokens: budgeted.estimatedTokens,
+   626→                        targetTokens: totalTargetTokens,
+   627→                        maxInputTokens: options.context.budget.request.maxInputTokens,
+   628→                });
+   629→        }
+   630→        const mergedMessages = mergeAdjacentUserTurns(
+   631→                budgeted.messages,
+   632→                originalMessages,
+   633→        );
+   634→
+   635→        if (!haveMessagesChanged(originalMessages, mergedMessages)) {
+   636→                return undefined;
+   637→        }
+   638→        // Mirror the recovery_notice metadata convention: mark the folded
+   639→        // message as system-inserted and record what the fold removed, since
+   640→        // the per-message metrics it aggregates are stripped below. Stats
+   641→        // accumulate across repeated compactions — earlier passes already
+   642→        // stripped their metrics, so this pass only sees the new tail's.
+   643→        const prior = readPriorCompactionStats(mergedMessages[0]);
+   644→        const usageBefore = addAggregatedUsage(
+   645→                prior.usageBefore,
+   646→                aggregateUsageMetrics(originalMessages),
+   647→        );
+   648→        const compactionMetadata = {
+   649→                kind: "compaction",
+   650→                reason:
+   651→                        options.context.mode === "manual"
+   652→                                ? "manual_compaction"
+   653→                                : options.context.mode === "overflow_recovery"
+   654→                                        ? "overflow_recovery_compaction"
+   655→                                        : "auto_compaction",
+   656→                displayRole: "system",
+   657→                messagesRemoved:
+   658→                        prior.messagesRemoved + (originalMessages.length - mergedMessages.length),
+   659→                ...(usageBefore ? { usageBefore } : {}),
+   660→        };
+   661→        const resultMessages = mergedMessages.map((message, index) => {
+   662→                if (index === 0 && isTurnStartMessage(message)) {
+   663→                        return stripStaleMetrics({
+   664→                                ...message,
+   665→                                metadata: {
+   666→                                        ...message.metadata,
+   667→                                        ...compactionMetadata,
+   668→                                        userRunSpan: getUserRunSpan(message),
+   669→                                },
+   670→                        });
+   671→                }
+   672→                // Non-typed survivors (kept tool pairs and preserved answers) are
+   673→                // frozen so the next compaction leaves them alone.
+   674→                return stripStaleMetrics(
+   675→                        isTurnStartMessage(message)
+   676→                                ? message
+   677→                                : markPreservedByCompaction(message),
+   678→                );
+   679→        });
+   680→
+   681→        const afterTokens = getTotalTokens(
+   682→                resultMessages,
+   683→                options.estimateMessageTokens,
+   684→        );
+   685→        const budgetActionCount = budgeted.actions.filter(
+   686→                (action) =>
+   687→                        action.reason === "over_budget" || action.reason === "tool_pair_boundary",
+   688→        ).length;
+   689→        options.logger?.debug("Performed basic compaction", {
+   690→                messagesBefore: originalMessages.length,
+   691→                messagesAfter: resultMessages.length,
+   692→                messagesRemoved: originalMessages.length - resultMessages.length,
+   693→                tokensBefore: beforeTokens,
+   694→                tokensAfter: afterTokens,
+   695→                budgetStatus: budgeted.status,
+   696→                budgetActions: budgetActionCount,
+   697→                budgetWarnings: budgeted.warnings.map((warning) => warning.code),
+   698→                targetTokens: totalTargetTokens,
+   699→                maxInputTokens: options.context.budget.request.maxInputTokens,
+   700→        });
+   701→
+   702→        return {
+   703→                messages: resultMessages,
+   704→                budget: {
+   705→                        policyIntent: "basic_compaction_projection",
+   706→                        actionCount: budgetActionCount,
+   707→                        warningCount: budgeted.warnings.length,
+   708→                        liveTailHandling: budgeted.liveTailHandling,
+   709→                },
+   710→        };
+   711→}
+   712→

@@ -1,0 +1,523 @@
+     1→import type { ClineMessage } from "@shared/ExtensionMessage"
+     2→import { EmptyRequest, StringRequest } from "@shared/proto/cline/common"
+     3→import { AskResponseRequest, NewTaskRequest } from "@shared/proto/cline/task"
+     4→import { IntentEvent } from "@shared/proto/cline/ui"
+     5→import { useCallback, useRef } from "react"
+     6→import { useExtensionState } from "@/context/ExtensionStateContext"
+     7→import { SlashServiceClient, TaskServiceClient, UiServiceClient } from "@/services/grpc-client"
+     8→import type { ButtonActionType } from "../shared/buttonConfig"
+     9→import type { ChatState, MessageHandlers } from "../types/chatTypes"
+    10→
+    11→/**
+    12→ * Custom hook for managing message handlers
+    13→ * Handles sending messages, button clicks, and task management
+    14→ */
+    15→export function useMessageHandlers(messages: ClineMessage[], chatState: ChatState): MessageHandlers {
+    16→        const { backgroundCommandRunning, turnState } = useExtensionState()
+    17→        const {
+    18→                setInputValue,
+    19→                activeQuote,
+    20→                setActiveQuote,
+    21→                setSelectedImages,
+    22→                setSelectedFiles,
+    23→                sendingDisabled,
+    24→                setSendingDisabled,
+    25→                enableButtons,
+    26→                setEnableButtons,
+    27→                setPendingUserMessage,
+    28→                setPendingResponse,
+    29→                clineAsk,
+    30→                lastMessage,
+    31→        } = chatState
+    32→        const cancelInFlightRef = useRef(false)
+    33→        const pendingResponseIdRef = useRef(0)
+    34→
+    35→        // Handle sending a message
+    36→        const handleSendMessage = useCallback(
+    37→                async (text: string, images: string[], files: string[]) => {
+    38→                        let messageToSend = text.trim()
+    39→                        const hasContent = messageToSend || images.length > 0 || files.length > 0
+    40→
+    41→                        // Prepend the active quote if it exists
+    42→                        if (activeQuote && hasContent) {
+    43→                                const prefix = "[context] \n> "
+    44→                                const formattedQuote = activeQuote
+    45→                                const suffix = "\n[/context] \n\n"
+    46→                                messageToSend = `${prefix} ${formattedQuote} ${suffix} ${messageToSend}`
+    47→                        }
+    48→
+    49→                        // Intercept the built-in compaction commands when an active task exists.
+    50→                        // `/compact` (and its aliases `/smol` and `/newtask`) must run a real
+    51→                        // SDK manual compaction via the condense RPC — sending the literal
+    52→                        // text to the model would make it improvise a fake summary instead of
+    53→                        // compacting the context window (CLINE-2503). `/newtask` aliases
+    54→                        // compaction because condensing achieves its goal (continue working
+    55→                        // with a fresh, summarized context) without the legacy new_task tool.
+    56→                        // With no active task there is nothing to compact, so fall through to
+    57→                        // normal new-task handling.
+    58→                        if (
+    59→                                messages.length > 0 &&
+    60→                                (messageToSend === "/compact" || messageToSend === "/smol" || messageToSend === "/newtask")
+    61→                        ) {
+    62→                                // Clear the input before awaiting the RPC — condense resolves only
+    63→                                // after compaction finishes, and the typed command lingering in the
+    64→                                // field the whole time reads as if the send didn't register.
+    65→                                setInputValue("")
+    66→                                setActiveQuote(null)
+    67→                                await SlashServiceClient.condense(StringRequest.create({ value: "compact" })).catch((err) =>
+    68→                                        console.error("Failed to compact task:", err),
+    69→                                )
+    70→                                if ("disableAutoScrollRef" in chatState) {
+    71→                                        ;(chatState as any).disableAutoScrollRef.current = false
+    72→                                }
+    73→                                return
+    74→                        }
+    75→
+    76→                        if (hasContent) {
+    77→                                console.log("[ChatView] handleSendMessage - Sending message:", messageToSend)
+    78→                                let messageSent = false
+    79→                                const trackPromptSubmitted = (hasActiveTask: boolean) => {
+    80→                                        UiServiceClient.trackIntent(
+    81→                                                IntentEvent.create({
+    82→                                                        action: "prompt_submitted",
+    83→                                                        source: "chat_submit",
+    84→                                                        hasText: messageToSend.length > 0,
+    85→                                                        hasImages: images.length > 0,
+    86→                                                        hasFiles: files.length > 0,
+    87→                                                        hasActiveTask,
+    88→                                                        textLength: messageToSend.length,
+    89→                                                }),
+    90→                                        ).catch((error) => console.error("Failed to track prompt submit:", error))
+    91→                                }
+    92→                                const clearSentMessageState = () => {
+    93→                                        setInputValue("")
+    94→                                        setActiveQuote(null)
+    95→                                        setSendingDisabled(true)
+    96→                                        setSelectedImages([])
+    97→                                        setSelectedFiles([])
+    98→                                        setEnableButtons(false)
+    99→                                }
+   100→                                const restorePendingMessageState = () => {
+   101→                                        setInputValue(text)
+   102→                                        setActiveQuote(activeQuote)
+   103→                                        setSendingDisabled(sendingDisabled)
+   104→                                        setSelectedImages(images)
+   105→                                        setSelectedFiles(files)
+   106→                                        setEnableButtons(enableButtons)
+   107→                                }
+   108→                                const beginPendingResponse = (pendingMessage?: ClineMessage) => {
+   109→                                        const id = ++pendingResponseIdRef.current
+   110→                                        // A follow-up submitted during an active stream is queued/steering feedback.
+   111→                                        // The authoritative streaming UI is already current, so forcing a loader could
+   112→                                        // duplicate it alongside content that is still visibly streaming.
+   113→                                        if (turnState?.phase !== "streaming") {
+   114→                                                setPendingResponse({
+   115→                                                        id,
+   116→                                                        turnStateSeq: turnState?.seq,
+   117→                                                        messageCount: messages.length,
+   118→                                                })
+   119→                                        }
+   120→                                        const optimisticMessage = pendingMessage
+   121→                                                ? {
+   122→                                                                afterTs: Math.max(0, ...messages.map((message) => message.ts)),
+   123→                                                                message: pendingMessage,
+   124→                                                        }
+   125→                                                : undefined
+   126→                                        if (optimisticMessage) {
+   127→                                                setPendingUserMessage(optimisticMessage)
+   128→                                        }
+   129→                                        return { id, optimisticMessage }
+   130→                                }
+   131→                                const rollbackPendingResponse = (
+   132→                                        id: number,
+   133→                                        optimisticMessage: ReturnType<typeof beginPendingResponse>["optimisticMessage"],
+   134→                                ) => {
+   135→                                        setPendingResponse((current) => (current?.id === id ? undefined : current))
+   136→                                        if (optimisticMessage) {
+   137→                                                setPendingUserMessage((current) => (current === optimisticMessage ? undefined : current))
+   138→                                        }
+   139→                                }
+   140→                                const sendAskResponseWithPendingState = async (
+   141→                                        request: ReturnType<typeof AskResponseRequest.create>,
+   142→                                        options: { showPendingMessage?: boolean } = {},
+   143→                                ) => {
+   144→                                        trackPromptSubmitted(true)
+   145→                                        clearSentMessageState()
+   146→                                        const { id, optimisticMessage } = beginPendingResponse(
+   147→                                                options.showPendingMessage
+   148→                                                        ? {
+   149→                                                                        ts: Date.now(),
+   150→                                                                        type: "say",
+   151→                                                                        say: "user_feedback",
+   152→                                                                        text: request.text ?? "",
+   153→                                                                        images: request.images,
+   154→                                                                        files: request.files,
+   155→                                                                        partial: false,
+   156→                                                                }
+   157→                                                        : undefined,
+   158→                                        )
+   159→                                        try {
+   160→                                                await TaskServiceClient.askResponse(request)
+   161→                                        } catch (error) {
+   162→                                                rollbackPendingResponse(id, optimisticMessage)
+   163→                                                restorePendingMessageState()
+   164→                                                throw error
+   165→                                        }
+   166→                                }
+   167→
+   168→                                if (messages.length === 0) {
+   169→                                        const request = NewTaskRequest.create({
+   170→                                                text: messageToSend,
+   171→                                                images,
+   172→                                                files,
+   173→                                        })
+   174→                                        clearSentMessageState()
+   175→                                        trackPromptSubmitted(false)
+   176→                                        const { id, optimisticMessage } = beginPendingResponse({
+   177→                                                ts: Date.now(),
+   178→                                                type: "say",
+   179→                                                say: "task",
+   180→                                                text: messageToSend,
+   181→                                                images,
+   182→                                                files,
+   183→                                                partial: false,
+   184→                                        })
+   185→                                        try {
+   186→                                                await TaskServiceClient.newTask(request)
+   187→                                        } catch (error) {
+   188→                                                rollbackPendingResponse(id, optimisticMessage)
+   189→                                                restorePendingMessageState()
+   190→                                                throw error
+   191→                                        }
+   192→                                        messageSent = true
+   193→                                } else if (turnState?.phase === "awaiting_approval") {
+   194→                                        await sendAskResponseWithPendingState(
+   195→                                                AskResponseRequest.create({
+   196→                                                        responseType: "noButtonClicked",
+   197→                                                        text: messageToSend,
+   198→                                                        images,
+   199→                                                        files,
+   200→                                                }),
+   201→                                        )
+   202→                                        messageSent = true
+   203→                                } else if (clineAsk) {
+   204→                                        // For resume_task and resume_completed_task, use yesButtonClicked to match Resume button behavior
+   205→                                        // This ensures Enter key and Resume button work identically
+   206→                                        if (clineAsk === "resume_task" || clineAsk === "resume_completed_task") {
+   207→                                                // Resuming a task opened from history rebuilds the SDK session before the
+   208→                                                // extension echoes say:user_feedback, so without an optimistic bubble the
+   209→                                                // user's message would not appear until the (slow) resume finishes — the
+   210→                                                // chat would show only the Thinking loader in the meantime.
+   211→                                                await sendAskResponseWithPendingState(
+   212→                                                        AskResponseRequest.create({
+   213→                                                                responseType: "yesButtonClicked",
+   214→                                                                text: messageToSend,
+   215→                                                                images,
+   216→                                                                files,
+   217→                                                        }),
+   218→                                                        { showPendingMessage: turnState?.phase !== "streaming" },
+   219→                                                )
+   220→                                                messageSent = true
+   221→                                        } else {
+   222→                                                // All other ask types use messageResponse
+   223→                                                switch (clineAsk) {
+   224→                                                        case "followup":
+   225→                                                        case "plan_mode_respond":
+   226→                                                        case "tool":
+   227→                                                        case "browser_action_launch":
+   228→                                                        case "command":
+   229→                                                        case "command_output":
+   230→                                                        case "use_mcp_server":
+   231→                                                        case "use_subagents":
+   232→                                                        case "completion_result":
+   233→                                                        case "mistake_limit_reached":
+   234→                                                        case "api_req_failed":
+   235→                                                        case "new_task":
+   236→                                                        case "condense":
+   237→                                                        case "report_bug": {
+   238→                                                                // Most askResponse sends need a temporary webview-only user bubble because the
+   239→                                                                // extension will not echo the user's message until later. Active follow-up
+   240→                                                                // questions are the exception: they are backed by the SDK's pending ask_question
+   241→                                                                // resolver. When the user types a freeform answer instead of clicking one of the
+   242→                                                                // option buttons, that resolver consumes the response before normal follow-up
+   243→                                                                // routing and immediately appends the real say:user_feedback row. If we also add
+   244→                                                                // an optimistic pending row here, the chat shows the same answer twice.
+   245→                                                                const showPendingMessage = clineAsk !== "followup" && turnState?.phase !== "streaming"
+   246→
+   247→                                                                await sendAskResponseWithPendingState(
+   248→                                                                        AskResponseRequest.create({
+   249→                                                                                responseType: "messageResponse",
+   250→                                                                                text: messageToSend,
+   251→                                                                                images,
+   252→                                                                                files,
+   253→                                                                        }),
+   254→                                                                        { showPendingMessage },
+   255→                                                                )
+   256→                                                                messageSent = true
+   257→                                                                break
+   258→                                                        }
+   259→                                                }
+   260→                                        }
+   261→                                } else if (messages.length > 0) {
+   262→                                        // No clineAsk set, but there is an existing conversation. Route this to the
+   263→                                        // active session as a follow-up when either:
+   264→                                        //
+   265→                                        //   1. The authoritative turnState says the conversation is continuable —
+   266→                                        //      phases "completed" / "awaiting_followup" (the agent finished or is
+   267→                                        //      waiting for the user) or "streaming" (interrupt with feedback). The SDK
+   268→                                        //      does not emit a trailing ask:"completion_result", so clineAsk is
+   269→                                        //      undefined even when the user can keep talking; turnState is the source
+   270→                                        //      of truth.
+   271→                                        //   2. Legacy fallback (no turnState): the task looks actively running from the
+   272→                                        //      message tail.
+   273→                                        const lastMessage = messages[messages.length - 1]
+   274→                                        const isTaskRunning =
+   275→                                                lastMessage.partial === true || (lastMessage.type === "say" && lastMessage.say === "api_req_started")
+   276→                                        const turnAllowsFollowup =
+   277→                                                turnState?.phase === "completed" ||
+   278→                                                turnState?.phase === "awaiting_followup" ||
+   279→                                                turnState?.phase === "streaming"
+   280→
+   281→                                        if (turnAllowsFollowup || isTaskRunning) {
+   282→                                                // Continue the conversation / interrupt with feedback.
+   283→                                                await sendAskResponseWithPendingState(
+   284→                                                        AskResponseRequest.create({
+   285→                                                                responseType: "messageResponse",
+   286→                                                                text: messageToSend,
+   287→                                                                images,
+   288→                                                                files,
+   289→                                                        }),
+   290→                                                        {
+   291→                                                                showPendingMessage: turnState?.phase === "completed" || turnState?.phase === "awaiting_followup",
+   292→                                                        },
+   293→                                                )
+   294→                                                messageSent = true
+   295→                                        }
+   296→                                }
+   297→
+   298→                                // New tasks clear optimistically before the RPC; the repeated success cleanup is idempotent.
+   299→                                if (messageSent) {
+   300→                                        clearSentMessageState()
+   301→
+   302→                                        // Reset auto-scroll
+   303→                                        if ("disableAutoScrollRef" in chatState) {
+   304→                                                ;(chatState as any).disableAutoScrollRef.current = false
+   305→                                        }
+   306→                                }
+   307→                        }
+   308→                },
+   309→                [
+   310→                        messages,
+   311→                        clineAsk,
+   312→                        turnState,
+   313→                        activeQuote,
+   314→                        setInputValue,
+   315→                        setActiveQuote,
+   316→                        sendingDisabled,
+   317→                        setSendingDisabled,
+   318→                        setSelectedImages,
+   319→                        setSelectedFiles,
+   320→                        enableButtons,
+   321→                        setEnableButtons,
+   322→                        setPendingUserMessage,
+   323→                        setPendingResponse,
+   324→                        chatState,
+   325→                ],
+   326→        )
+   327→
+   328→        // Start a new task
+   329→        const startNewTask = useCallback(async () => {
+   330→                UiServiceClient.trackIntent(
+   331→                        IntentEvent.create({
+   332→                                action: "new_task_clicked",
+   333→                                source: "chat_new_task",
+   334→                                hasActiveTask: messages.length > 0,
+   335→                        }),
+   336→                ).catch((error) => console.error("Failed to track new task click:", error))
+   337→                setActiveQuote(null)
+   338→                // Drop any unconfirmed optimistic message: if it lingered past an explicit
+   339→                // New Task, withPendingUserMessage would re-inject the old task (and its
+   340→                // attachments) into the freshly cleared transcript, leaving the chat stuck
+   341→                // on the previous task (#12924).
+   342→                setPendingUserMessage(undefined)
+   343→                setPendingResponse(undefined)
+   344→                await TaskServiceClient.clearTask(EmptyRequest.create({}))
+   345→        }, [messages.length, setActiveQuote, setPendingUserMessage, setPendingResponse])
+   346→
+   347→        // Clear input state helper
+   348→        const clearInputState = useCallback(() => {
+   349→                setInputValue("")
+   350→                setActiveQuote(null)
+   351→                setSelectedImages([])
+   352→                setSelectedFiles([])
+   353→        }, [setInputValue, setActiveQuote, setSelectedImages, setSelectedFiles])
+   354→
+   355→        // Execute button action based on type
+   356→        const executeButtonAction = useCallback(
+   357→                async (actionType: ButtonActionType, text?: string, images?: string[], files?: string[]) => {
+   358→                        const trimmedInput = text?.trim()
+   359→                        const hasContent = trimmedInput || (images && images.length > 0) || (files && files.length > 0)
+   360→
+   361→                        switch (actionType) {
+   362→                                case "retry":
+   363→                                        // For API retry (api_req_failed), always send simple approval without content
+   364→                                        await TaskServiceClient.askResponse(
+   365→                                                AskResponseRequest.create({
+   366→                                                        responseType: "yesButtonClicked",
+   367→                                                }),
+   368→                                        )
+   369→                                        clearInputState()
+   370→                                        break
+   371→                                case "approve":
+   372→                                        if (hasContent) {
+   373→                                                await TaskServiceClient.askResponse(
+   374→                                                        AskResponseRequest.create({
+   375→                                                                responseType: "yesButtonClicked",
+   376→                                                                text: trimmedInput,
+   377→                                                                images: images,
+   378→                                                                files: files,
+   379→                                                        }),
+   380→                                                )
+   381→                                        } else {
+   382→                                                await TaskServiceClient.askResponse(
+   383→                                                        AskResponseRequest.create({
+   384→                                                                responseType: "yesButtonClicked",
+   385→                                                        }),
+   386→                                                )
+   387→                                        }
+   388→                                        clearInputState()
+   389→                                        break
+   390→
+   391→                                case "reject":
+   392→                                        if (hasContent) {
+   393→                                                await TaskServiceClient.askResponse(
+   394→                                                        AskResponseRequest.create({
+   395→                                                                responseType: "noButtonClicked",
+   396→                                                                text: trimmedInput,
+   397→                                                                images: images,
+   398→                                                                files: files,
+   399→                                                        }),
+   400→                                                )
+   401→                                        } else {
+   402→                                                await TaskServiceClient.askResponse(
+   403→                                                        AskResponseRequest.create({
+   404→                                                                responseType: "noButtonClicked",
+   405→                                                        }),
+   406→                                                )
+   407→                                        }
+   408→                                        clearInputState()
+   409→                                        break
+   410→
+   411→                                case "proceed":
+   412→                                        if (hasContent) {
+   413→                                                await TaskServiceClient.askResponse(
+   414→                                                        AskResponseRequest.create({
+   415→                                                                responseType: "yesButtonClicked",
+   416→                                                                text: trimmedInput,
+   417→                                                                images: images,
+   418→                                                                files: files,
+   419→                                                        }),
+   420→                                                )
+   421→                                        } else {
+   422→                                                await TaskServiceClient.askResponse(
+   423→                                                        AskResponseRequest.create({
+   424→                                                                responseType: "yesButtonClicked",
+   425→                                                        }),
+   426→                                                )
+   427→                                        }
+   428→                                        clearInputState()
+   429→                                        break
+   430→
+   431→                                case "proceed_while_running":
+   432→                                        // Detach the running foreground terminal command: the agent
+   433→                                        // receives the partial output plus a log file path for the
+   434→                                        // rest, and the command keeps running in the terminal.
+   435→                                        await TaskServiceClient.proceedWhileRunningCommand(EmptyRequest.create({})).catch((err) =>
+   436→                                                console.error("Failed to proceed while running:", err),
+   437→                                        )
+   438→                                        break
+   439→
+   440→                                case "new_task":
+   441→                                        if (clineAsk === "new_task") {
+   442→                                                await TaskServiceClient.newTask(
+   443→                                                        NewTaskRequest.create({
+   444→                                                                text: lastMessage?.text,
+   445→                                                                images: [],
+   446→                                                                files: [],
+   447→                                                        }),
+   448→                                                )
+   449→                                        } else {
+   450→                                                await startNewTask()
+   451→                                        }
+   452→                                        break
+   453→
+   454→                                case "cancel": {
+   455→                                        if (cancelInFlightRef.current) {
+   456→                                                return
+   457→                                        }
+   458→                                        cancelInFlightRef.current = true
+   459→                                        setSendingDisabled(true)
+   460→                                        setEnableButtons(false)
+   461→                                        try {
+   462→                                                if (backgroundCommandRunning) {
+   463→                                                        await TaskServiceClient.cancelBackgroundCommand(EmptyRequest.create({})).catch((err) =>
+   464→                                                                console.error("Failed to cancel background command:", err),
+   465→                                                        )
+   466→                                                }
+   467→                                                await TaskServiceClient.cancelTask(EmptyRequest.create({}))
+   468→                                        } finally {
+   469→                                                cancelInFlightRef.current = false
+   470→                                                // Clear any pending state that might interfere with resume
+   471→                                                setSendingDisabled(false)
+   472→                                                setEnableButtons(true)
+   473→                                        }
+   474→                                        break
+   475→                                }
+   476→
+   477→                                case "utility":
+   478→                                        switch (clineAsk) {
+   479→                                                case "condense":
+   480→                                                        await SlashServiceClient.condense(StringRequest.create({ value: lastMessage?.text })).catch((err) =>
+   481→                                                                console.error(err),
+   482→                                                        )
+   483→                                                        break
+   484→                                                case "report_bug":
+   485→                                                        await SlashServiceClient.reportBug(StringRequest.create({ value: lastMessage?.text })).catch((err) =>
+   486→                                                                console.error(err),
+   487→                                                        )
+   488→                                                        break
+   489→                                        }
+   490→                                        break
+   491→                        }
+   492→
+   493→                        if ("disableAutoScrollRef" in chatState) {
+   494→                                ;(chatState as any).disableAutoScrollRef.current = false
+   495→                        }
+   496→                },
+   497→                [
+   498→                        clineAsk,
+   499→                        lastMessage,
+   500→                        messages,
+   501→                        clearInputState,
+   502→                        handleSendMessage,
+   503→                        startNewTask,
+   504→                        chatState,
+   505→                        backgroundCommandRunning,
+   506→                        setSendingDisabled,
+   507→                        setEnableButtons,
+   508→                ],
+   509→        )
+   510→
+   511→        // Handle task close button click
+   512→        const handleTaskCloseButtonClick = useCallback(() => {
+   513→                startNewTask()
+   514→        }, [startNewTask])
+   515→
+   516→        return {
+   517→                handleSendMessage,
+   518→                executeButtonAction,
+   519→                handleTaskCloseButtonClick,
+   520→                startNewTask,
+   521→        }
+   522→}
+   523→

@@ -1,0 +1,502 @@
+     1→{
+     2→        "name": "claude-dev",
+     3→        "displayName": "Cline",
+     4→        "description": "Autonomous coding agent right in your IDE, capable of creating/editing files, running commands, using the browser, and more with your permission every step of the way.",
+     5→        "version": "4.1.8",
+     6→        "icon": "assets/icons/icon.png",
+     7→        "engines": {
+     8→                "vscode": "^1.101.0"
+     9→        },
+    10→        "author": {
+    11→                "name": "Cline Bot Inc."
+    12→        },
+    13→        "license": "Apache-2.0",
+    14→        "publisher": "saoudrizwan",
+    15→        "repository": {
+    16→                "type": "git",
+    17→                "url": "https://github.com/cline/cline"
+    18→        },
+    19→        "homepage": "https://cline.bot",
+    20→        "categories": [
+    21→                "AI",
+    22→                "Chat",
+    23→                "Programming Languages",
+    24→                "Education",
+    25→                "Snippets",
+    26→                "Testing"
+    27→        ],
+    28→        "keywords": [
+    29→                "cline",
+    30→                "claude",
+    31→                "dev",
+    32→                "mcp",
+    33→                "openrouter",
+    34→                "coding",
+    35→                "agent",
+    36→                "autonomous",
+    37→                "chatgpt",
+    38→                "sonnet",
+    39→                "ai",
+    40→                "llama"
+    41→        ],
+    42→        "activationEvents": [
+    43→                "onLanguage",
+    44→                "onUri",
+    45→                "onStartupFinished"
+    46→        ],
+    47→        "main": "./dist/extension.js",
+    48→        "contributes": {
+    49→                "icons": {
+    50→                        "cline-icon": {
+    51→                                "description": "cline",
+    52→                                "default": {
+    53→                                        "fontPath": "assets/icons/cline-bot.woff",
+    54→                                        "fontCharacter": "\\e900"
+    55→                                }
+    56→                        }
+    57→                },
+    58→                "walkthroughs": [
+    59→                        {
+    60→                                "id": "ClineWalkthrough",
+    61→                                "title": "Meet Cline, your new coding partner",
+    62→                                "description": "Cline codes like a developer because it thinks like one. Here are 5 ways to put it to work:",
+    63→                                "steps": [
+    64→                                        {
+    65→                                                "id": "welcome",
+    66→                                                "title": "Start with a Goal, Not Just a Prompt",
+    67→                                                "description": "Tell Cline what you want to achieve. It plans, asks, and then codes, like a true partner.",
+    68→                                                "media": {
+    69→                                                        "markdown": "walkthrough/step1.md"
+    70→                                                }
+    71→                                        },
+    72→                                        {
+    73→                                                "id": "learn",
+    74→                                                "title": "Let Cline Learn Your Codebase",
+    75→                                                "description": "Point Cline to your project. It builds understanding to make smart, context-aware changes.",
+    76→                                                "media": {
+    77→                                                        "markdown": "walkthrough/step2.md"
+    78→                                                }
+    79→                                        },
+    80→                                        {
+    81→                                                "id": "advanced-features",
+    82→                                                "title": "Always Use the Best AI Models",
+    83→                                                "description": "Cline empowers you with State-of-the-Art AI, connecting to top models (Anthropic, Gemini, OpenAI & more).",
+    84→                                                "media": {
+    85→                                                        "markdown": "walkthrough/step3.md"
+    86→                                                }
+    87→                                        },
+    88→                                        {
+    89→                                                "id": "mcp",
+    90→                                                "title": "Extend with Powerful Tools (MCP)",
+    91→                                                "description": "Connect to databases, APIs, and other external tools through MCP.",
+    92→                                                "media": {
+    93→                                                        "markdown": "walkthrough/step4.md"
+    94→                                                }
+    95→                                        },
+    96→                                        {
+    97→                                                "id": "getting-started",
+    98→                                                "title": "You're Always in Control",
+    99→                                                "description": "Review Cline's plans and diffs. Approve changes before they happen. No surprises.",
+   100→                                                "media": {
+   101→                                                        "markdown": "walkthrough/step5.md"
+   102→                                                },
+   103→                                                "content": {
+   104→                                                        "path": "walkthrough/step5.md"
+   105→                                                }
+   106→                                        }
+   107→                                ]
+   108→                        }
+   109→                ],
+   110→                "viewsContainers": {
+   111→                        "activitybar": [
+   112→                                {
+   113→                                        "id": "claude-dev-ActivityBar",
+   114→                                        "title": "Cline",
+   115→                                        "icon": "assets/icons/icon.svg"
+   116→                                }
+   117→                        ]
+   118→                },
+   119→                "views": {
+   120→                        "claude-dev-ActivityBar": [
+   121→                                {
+   122→                                        "type": "webview",
+   123→                                        "id": "claude-dev.SidebarProvider",
+   124→                                        "name": "",
+   125→                                        "icon": "assets/icons/icon.svg"
+   126→                                }
+   127→                        ]
+   128→                },
+   129→                "commands": [
+   130→                        {
+   131→                                "command": "cline.plusButtonClicked",
+   132→                                "title": "New Task",
+   133→                                "icon": "$(add)"
+   134→                        },
+   135→                        {
+   136→                                "command": "cline.mcpButtonClicked",
+   137→                                "title": "MCP Servers",
+   138→                                "icon": "$(server)"
+   139→                        },
+   140→                        {
+   141→                                "command": "cline.marketplaceButtonClicked",
+   142→                                "title": "Customize",
+   143→                                "icon": "$(wrench)"
+   144→                        },
+   145→                        {
+   146→                                "command": "cline.historyButtonClicked",
+   147→                                "title": "History",
+   148→                                "icon": "$(history)"
+   149→                        },
+   150→                        {
+   151→                                "command": "cline.accountButtonClicked",
+   152→                                "title": "Account",
+   153→                                "icon": "$(account)"
+   154→                        },
+   155→                        {
+   156→                                "command": "cline.settingsButtonClicked",
+   157→                                "title": "Settings",
+   158→                                "icon": "$(settings-gear)"
+   159→                        },
+   160→                        {
+   161→                                "command": "cline.dev.createTestTasks",
+   162→                                "title": "Create Test Tasks",
+   163→                                "category": "Cline",
+   164→                                "when": "cline.isDevMode"
+   165→                        },
+   166→                        {
+   167→                                "command": "cline.dev.expireMcpOAuthTokens",
+   168→                                "title": "Expire MCP OAuth Tokens (for testing)",
+   169→                                "category": "Cline",
+   170→                                "when": "cline.isDevMode"
+   171→                        },
+   172→                        {
+   173→                                "command": "cline.addToChat",
+   174→                                "title": "Add to Cline",
+   175→                                "category": "Cline"
+   176→                        },
+   177→                        {
+   178→                                "command": "cline.addTerminalOutputToChat",
+   179→                                "title": "Add to Cline",
+   180→                                "category": "Cline"
+   181→                        },
+   182→                        {
+   183→                                "command": "cline.focusChatInput",
+   184→                                "title": "Jump to Chat Input",
+   185→                                "category": "Cline"
+   186→                        },
+   187→                        {
+   188→                                "command": "cline.generateGitCommitMessage",
+   189→                                "title": "Generate Commit Message with Cline",
+   190→                                "category": "Cline",
+   191→                                "icon": "$(cline-icon)"
+   192→                        },
+   193→                        {
+   194→                                "command": "cline.abortGitCommitMessage",
+   195→                                "title": "Generate Commit Message with Cline - Stop",
+   196→                                "category": "Cline",
+   197→                                "icon": "$(debug-stop)"
+   198→                        },
+   199→                        {
+   200→                                "command": "cline.explainCode",
+   201→                                "title": "Explain with Cline",
+   202→                                "category": "Cline"
+   203→                        },
+   204→                        {
+   205→                                "command": "cline.improveCode",
+   206→                                "title": "Improve with Cline",
+   207→                                "category": "Cline"
+   208→                        },
+   209→                        {
+   210→                                "command": "cline.jupyterGenerateCell",
+   211→                                "title": "Generate Jupyter Cell with Cline",
+   212→                                "category": "Cline",
+   213→                                "icon": "$(sparkle)"
+   214→                        },
+   215→                        {
+   216→                                "command": "cline.jupyterExplainCell",
+   217→                                "title": "Explain Jupyter Cell with Cline",
+   218→                                "category": "Cline",
+   219→                                "icon": "$(question)"
+   220→                        },
+   221→                        {
+   222→                                "command": "cline.jupyterImproveCell",
+   223→                                "title": "Improve Jupyter Cell with Cline",
+   224→                                "category": "Cline",
+   225→                                "icon": "$(lightbulb)"
+   226→                        },
+   227→                        {
+   228→                                "command": "cline.openWalkthrough",
+   229→                                "title": "Open Walkthrough",
+   230→                                "category": "Cline"
+   231→                        }
+   232→                ],
+   233→                "keybindings": [
+   234→                        {
+   235→                                "command": "cline.addToChat",
+   236→                                "key": "cmd+'",
+   237→                                "mac": "cmd+'",
+   238→                                "win": "ctrl+'",
+   239→                                "linux": "ctrl+'",
+   240→                                "when": "editorHasSelection"
+   241→                        },
+   242→                        {
+   243→                                "command": "cline.generateGitCommitMessage",
+   244→                                "when": "config.git.enabled && scmProvider == git"
+   245→                        },
+   246→                        {
+   247→                                "command": "cline.focusChatInput",
+   248→                                "key": "cmd+'",
+   249→                                "mac": "cmd+'",
+   250→                                "win": "ctrl+'",
+   251→                                "linux": "ctrl+'",
+   252→                                "when": "!editorHasSelection"
+   253→                        }
+   254→                ],
+   255→                "menus": {
+   256→                        "view/title": [
+   257→                                {
+   258→                                        "command": "cline.plusButtonClicked",
+   259→                                        "group": "navigation@1",
+   260→                                        "when": "view == claude-dev.SidebarProvider"
+   261→                                },
+   262→                                {
+   263→                                        "command": "cline.marketplaceButtonClicked",
+   264→                                        "group": "navigation@2",
+   265→                                        "when": "view == claude-dev.SidebarProvider"
+   266→                                },
+   267→                                {
+   268→                                        "command": "cline.historyButtonClicked",
+   269→                                        "group": "navigation@3",
+   270→                                        "when": "view == claude-dev.SidebarProvider"
+   271→                                },
+   272→                                {
+   273→                                        "command": "cline.accountButtonClicked",
+   274→                                        "group": "navigation@5",
+   275→                                        "when": "view == claude-dev.SidebarProvider"
+   276→                                },
+   277→                                {
+   278→                                        "command": "cline.settingsButtonClicked",
+   279→                                        "group": "navigation@6",
+   280→                                        "when": "view == claude-dev.SidebarProvider"
+   281→                                }
+   282→                        ],
+   283→                        "editor/context": [
+   284→                                {
+   285→                                        "command": "cline.addToChat",
+   286→                                        "group": "navigation",
+   287→                                        "when": "editorHasSelection"
+   288→                                }
+   289→                        ],
+   290→                        "terminal/context": [
+   291→                                {
+   292→                                        "command": "cline.addTerminalOutputToChat",
+   293→                                        "group": "navigation"
+   294→                                }
+   295→                        ],
+   296→                        "scm/title": [
+   297→                                {
+   298→                                        "command": "cline.generateGitCommitMessage",
+   299→                                        "group": "navigation",
+   300→                                        "when": "config.git.enabled && scmProvider == git && !cline.isGeneratingCommit"
+   301→                                },
+   302→                                {
+   303→                                        "command": "cline.abortGitCommitMessage",
+   304→                                        "group": "navigation",
+   305→                                        "when": "config.git.enabled && scmProvider == git && cline.isGeneratingCommit"
+   306→                                }
+   307→                        ],
+   308→                        "notebook/toolbar": [
+   309→                                {
+   310→                                        "command": "cline.jupyterGenerateCell",
+   311→                                        "group": "navigation/add@1",
+   312→                                        "when": "notebookType == 'jupyter-notebook'"
+   313→                                }
+   314→                        ],
+   315→                        "notebook/cell/title": [
+   316→                                {
+   317→                                        "command": "cline.jupyterExplainCell",
+   318→                                        "group": "inline@1",
+   319→                                        "when": "notebookType == 'jupyter-notebook'"
+   320→                                },
+   321→                                {
+   322→                                        "command": "cline.jupyterImproveCell",
+   323→                                        "group": "inline@2",
+   324→                                        "when": "notebookType == 'jupyter-notebook'"
+   325→                                }
+   326→                        ],
+   327→                        "commandPalette": [
+   328→                                {
+   329→                                        "command": "cline.generateGitCommitMessage",
+   330→                                        "when": "config.git.enabled && !cline.isGeneratingCommit"
+   331→                                },
+   332→                                {
+   333→                                        "command": "cline.abortGitCommitMessage",
+   334→                                        "when": "config.git.enabled && cline.isGeneratingCommit"
+   335→                                }
+   336→                        ]
+   337→                },
+   338→                "configuration": {
+   339→                        "title": "Cline",
+   340→                        "properties": {}
+   341→                }
+   342→        },
+   343→        "scripts": {
+   344→                "vscode:prepublish": "bun run package",
+   345→                "compile": "bun run check-types && bun run lint && bun esbuild.mjs",
+   346→                "compile-standalone": "bun run check-types && bun run lint && bun esbuild.mjs --standalone",
+   347→                "postcompile-standalone": "node scripts/package-standalone.mjs",
+   348→                "dev": "bun run protos && bun run watch",
+   349→                "watch": "bun run --parallel watch:esbuild watch:tsc",
+   350→                "watch:esbuild": "bun esbuild.mjs --watch",
+   351→                "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+   352→                "package": "bun run check-types && bun run build:webview && bun run lint && bun esbuild.mjs --production",
+   353→                "protos": "node scripts/build-proto.mjs",
+   354→                "protos-python": "node scripts/build-python-proto.mjs",
+   355→                "download-ripgrep": "node scripts/download-ripgrep.mjs",
+   356→                "postprotos": "biome format --config-path ./biome.jsonc src/shared/proto src/core/controller src/hosts/ webview-ui/src/services src/generated --write --no-errors-on-unmatched",
+   357→                "clean:build": "rimraf dist dist-standalone webview-ui/build src/generated out/",
+   358→                "clean:deps": "rimraf node_modules webview-ui/node_modules",
+   359→                "clean:all": "bun run clean:build && bun run clean:deps",
+   360→                "compile-tests": "node ./scripts/build-tests.js",
+   361→                "watch-tests": "tsc -p . -w --outDir out",
+   362→                "check-types": "bun run protos && bunx tsc --noEmit && bun run check-types:compat && cd webview-ui && bunx tsc --noEmit",
+   363→                "check-types:compat": "bunx tsc --project tsconfig.vscode-compat.json --noEmit",
+   364→                "lint": "biome lint --config-path ./biome.jsonc --no-errors-on-unmatched --files-ignore-unknown=true --diagnostic-level=error && bun run lint:proto",
+   365→                "lint:proto": "bash ./scripts/proto-lint.sh",
+   366→                "analyze:unused": "bunx --yes knip --config knip.json --include files,exports,types,enumMembers,duplicates",
+   367→                "analyze:unused:prod": "bunx --yes knip --config knip.json --production --include files,exports,types,enumMembers,dependencies",
+   368→                "analyze:unused:fix-exports": "node scripts/remove-unused-exports.mjs --apply",
+   369→                "analyze:unused:fix-exports:dry": "node scripts/remove-unused-exports.mjs",
+   370→                "format": "biome format --config-path ./biome.jsonc --changed --since main --no-errors-on-unmatched --files-ignore-unknown=true --diagnostic-level=error --semicolons=as-needed",
+   371→                "format:fix": "biome check --config-path ./biome.jsonc --changed --since main --no-errors-on-unmatched --files-ignore-unknown=true --write --semicolons=as-needed",
+   372→                "fix:all": "biome check --config-path ./biome.jsonc --no-errors-on-unmatched --files-ignore-unknown=true --write --diagnostic-level=error --unsafe --semicolons=as-needed",
+   373→                "ci:check-all": "bun run --parallel check-types lint format",
+   374→                "ci:build": "bun run protos && bun run build:webview && bun esbuild.mjs && bun run compile-tests",
+   375→                "pretest": "bun run compile && bun run compile-tests && bun run compile-standalone && bun run lint",
+   376→                "test": "bun run test:unit && bun run test:integration",
+   377→                "test:integration": "bun run compile-tests && vscode-test",
+   378→                "test:unit": "bun scripts/run-bun-unit-tests.ts",
+   379→                "test:vitest": "vitest run --config vitest.config.ts",
+   380→                "test:vitest:watch": "vitest --config vitest.config.ts",
+   381→                "test:bun": "bun scripts/run-bun-tests.ts",
+   382→                "test:bun:unit": "bun scripts/run-bun-unit-tests.ts",
+   383→                "test:coverage": "bun run compile-tests && vscode-test --coverage",
+   384→                "test:sca-server": "bun --watch scripts/test-standalone-core-api-server.ts",
+   385→                "test:tp-orchestrator": "bun scripts/testing-platform-orchestrator.ts",
+   386→                "dev:mcp-oauth-test-server": "bun src/dev/mcp-oauth-test-server/server.ts",
+   387→                "e2e": "playwright test -c playwright.config.ts",
+   388→                "test:e2e:build": "vsce package --no-dependencies --allow-package-secrets sendgrid --out dist/e2e.vsix",
+   389→                "test:e2e": "playwright install && bun run test:e2e:build && node src/test/e2e/utils/build.mjs && playwright test",
+   390→                "test:e2e:optimal": "bun run test:e2e:build && node src/test/e2e/utils/build.mjs && playwright test",
+   391→                "test:e2e:ui": "bun scripts/interactive-playwright.ts",
+   392→                "install:all": "bun install",
+   393→                "dev:webview": "node scripts/clean-webview-vite-cache.mjs && cd webview-ui && bun run dev",
+   394→                "build:webview": "bun run protos && cd webview-ui && bun run build",
+   395→                "test:webview": "cd webview-ui && bun run test",
+   396→                "publish:marketplace": "node scripts/publish-marketplace.mjs",
+   397→                "publish:marketplace:prerelease": "node scripts/publish-marketplace.mjs --pre-release",
+   398→                "publish:marketplace:nightly": "node ./scripts/publish-nightly.mjs",
+   399→                "docs": "cd docs && bun run dev",
+   400→                "docs:check-links": "cd docs && bun run check",
+   401→                "docs:rename-file": "cd docs && bun run rename",
+   402→                "report-issue": "node scripts/report-issue.js",
+   403→                "storybook": "cd webview-ui && bun run storybook",
+   404→                "eval:smoke:run": "bun evals/smoke-tests/run-smoke-tests.ts"
+   405→        },
+   406→        "lint-staged": {
+   407→                "src/shared/storage/state-keys.ts": [
+   408→                        "node scripts/generate-state-proto.mjs",
+   409→                        "git add apps/vscode/proto/cline/state.proto"
+   410→                ],
+   411→                "*": [
+   412→                        "biome check --write --staged --no-errors-on-unmatched --files-ignore-unknown=true --semicolons=as-needed"
+   413→                ]
+   414→        },
+   415→        "devDependencies": {
+   416→                "@biomejs/biome": "^2.3.14",
+   417→                "@bufbuild/buf": "^1.54.0",
+   418→                "@microsoft/tui-test": "0.0.1",
+   419→                "@types/better-sqlite3": "^7.6.13",
+   420→                "@types/chai": "^5.0.1",
+   421→                "@types/clone-deep": "^4.0.4",
+   422→                "@types/get-folder-size": "^3.0.4",
+   423→                "@types/js-yaml": "^4.0.9",
+   424→                "@types/mocha": "^10.0.7",
+   425→                "@types/node": "22.15.1",
+   426→                "@types/pdf-parse": "^1.1.4",
+   427→                "@types/picomatch": "^4.0.2",
+   428→                "@types/shell-quote": "^1.7.5",
+   429→                "@types/should": "^11.2.0",
+   430→                "@types/sinon": "^21.0.0",
+   431→                "@types/turndown": "^5.0.5",
+   432→                "@types/vscode": "1.101.0",
+   433→                "@vscode/test-cli": "^0.0.12",
+   434→                "@vscode/test-electron": "^2.5.2",
+   435→                "@vscode/vsce": "^3.6.0",
+   436→                "c8": "^10.1.3",
+   437→                "chai": "^4.3.10",
+   438→                "chalk": "5.6.2",
+   439→                "dotenv": "^17.2.3",
+   440→                "esbuild": "^0.25.0",
+   441→                "glob": "^11.0.0",
+   442→                "grpc-tools": "^1.13.0",
+   443→                "lint-staged": "^16.1.0",
+   444→                "minimatch": "^3.0.3",
+   445→                "minimist": "^1.2.8",
+   446→                "mocha": "^11.7.4",
+   447→                "playwright": "^1.55.1",
+   448→                "prebuild-install": "^7.1.3",
+   449→                "protoc-gen-ts": "^0.8.7",
+   450→                "rimraf": "^6.0.1",
+   451→                "should": "^13.2.3",
+   452→                "sinon": "^21.0.3",
+   453→                "tar": "^7.5.2",
+   454→                "tree-kill": "^1.2.2",
+   455→                "ts-proto": "^2.6.1",
+   456→                "tsconfig-paths": "^4.2.0",
+   457→                "typescript": "^5.4.5",
+   458→                "vitest": "^4.0.17"
+   459→        },
+   460→        "dependencies": {
+   461→                "@anthropic-ai/sdk": "^0.37.0",
+   462→                "@bufbuild/protobuf": "^2.2.5",
+   463→                "@cline/agents": "workspace:*",
+   464→                "@cline/core": "workspace:*",
+   465→                "@cline/llms": "workspace:*",
+   466→                "@cline/shared": "workspace:*",
+   467→                "@google/genai": "^1.30.0",
+   468→                "@grpc/grpc-js": "^1.9.15",
+   469→                "@grpc/proto-loader": "^0.7.13",
+   470→                "@grpc/reflection": "^1.0.4",
+   471→                "@modelcontextprotocol/sdk": "^1.25.1",
+   472→                "@opentelemetry/api": "^1.9.0",
+   473→                "@opentelemetry/api-logs": "^0.56.0",
+   474→                "@opentelemetry/core": "^2.1.0",
+   475→                "@opentelemetry/exporter-logs-otlp-grpc": "^0.56.0",
+   476→                "@opentelemetry/exporter-logs-otlp-http": "^0.56.0",
+   477→                "@opentelemetry/exporter-logs-otlp-proto": "^0.56.0",
+   478→                "@opentelemetry/exporter-metrics-otlp-grpc": "^0.56.0",
+   479→                "@opentelemetry/exporter-metrics-otlp-http": "^0.56.0",
+   480→                "@opentelemetry/exporter-metrics-otlp-proto": "^0.56.0",
+   481→                "@opentelemetry/resources": "^1.30.1",
+   482→                "@opentelemetry/sdk-logs": "^0.56.0",
+   483→                "@opentelemetry/sdk-metrics": "^1.30.1",
+   484→                "@opentelemetry/semantic-conventions": "^1.37.0",
+   485→                "@playwright/test": "^1.55.1",
+   486→                "@streamparser/json": "^0.0.22",
+   487→                "@tailwindcss/vite": "^4.1.14",
+   488→                "@types/uuid": "^10.0.0",
+   489→                "@vscode/codicons": "^0.0.36",
+   490→                "archiver": "^7.0.1",
+   491→                "aws4fetch": "^1.0.20",
+   492→                "axios": "1.18.0",
+   493→                "better-sqlite3": "^12.4.1",
+   494→                "cheerio": "^1.0.0",
+   495→                "chokidar": "^4.0.1",
+   496→                "chrome-launcher": "^1.1.2",
+   497→                "clone-deep": "^4.0.1",
+   498→                "default-shell": "^2.2.0",
+   499→                "diff": "8.0.4",
+   500→                "exceljs": "^4.4.0",
+
+[showing lines 1-500 of 580; use offset=501 with limit to continue reading]
