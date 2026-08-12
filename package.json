@@ -128,15 +128,12 @@
           "arch": ["x64"]
         }
       ],
-      "icon": "electron/resources/icon.ico",
+      "icon": "electron/resources/icon.png",
       "artifactName": "${productName}-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "installerIcon": "electron/resources/icon.ico",
-      "uninstallerIcon": "electron/resources/icon.ico",
-      "installerHeaderIcon": "electron/resources/icon.ico",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "ACUTE AGENT",
@@ -145,7 +142,7 @@
     },
     "mac": {
       "target": "dmg",
-      "icon": "electron/resources/icon.icns",
+      "icon": "electron/resources/icon.png",
       "category": "public.app-category.developer-tools"
     },
     "linux": {

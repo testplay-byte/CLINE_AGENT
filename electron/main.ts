@@ -171,7 +171,11 @@ function createWindow(port: number) {
     minWidth: 900,
     minHeight: 600,
     title: 'ACUTE AGENT',
-    icon: join(__dirname, '..', 'resources', 'icon.png'),
+    // Icon path: in dev use source dir, in prod use resources
+    const iconPath = isDev
+      ? join(process.cwd(), 'electron', 'resources', 'icon.png')
+      : join(process.resourcesPath, 'icon.png');
+    icon: iconPath,
     backgroundColor: '#FFFBF0',
     show: false, // Show after ready-to-show to avoid flash
     autoHideMenuBar: true,

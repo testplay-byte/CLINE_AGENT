@@ -76,3 +76,36 @@ Stage Summary:
 - Theme system with 5 themes + dark/light mode
 - Bento-style shadows and custom animations throughout
 - Page compiles and renders successfully
+
+---
+Task ID: 4
+Agent: Main Agent
+Task: Add Electron desktop packaging and GitHub Actions CI/CD pipeline
+
+Work Log:
+- Created electron/main.ts — Electron main process (starts Next.js standalone server, BrowserWindow)
+- Created electron/preload.ts — Secure IPC bridge (contextBridge)
+- Created electron/ipc-handlers.ts — IPC handlers (window controls, app version)
+- Created electron/tsconfig.json — TypeScript config for Electron (ES2022, CommonJS, output to dist/electron/)
+- Generated app icon using AI image generation (1024x1024 PNG)
+- Updated package.json: added electron, electron-builder, concurrently, tsx, wait-on devDeps
+- Configured electron-builder in package.json: Windows NSIS, macOS DMG, Linux AppImage
+- Created .github/workflows/build-desktop.yml: multi-platform matrix build (win/mac/linux)
+- GitHub Actions workflow: checkout → setup bun/node → install → build Next.js → compile Electron TS → package → upload artifact → create release
+- Fixed TS error: excluded electron/ from Next.js tsconfig (was getting type-checked in Next.js build)
+- Fixed stray `net.request` reference in electron/main.ts
+- Fixed Windows tsc resolution: `npx tsc` → `npx -p typescript tsc` (wrong package on Windows)
+- Made release job use `always()` so successful platform builds still get released
+- Simplified extraResources: standalone dir is self-contained (static+public copied in CI before packaging)
+- Updated next.config.ts: unoptimized images for Electron, allowedDevOrigins, optimizePackageImports
+- Updated .gitignore: added release/, dist/electron/, upload/, tool-results/, screenshots
+- Added prepare-build.sh helper script
+
+Stage Summary:
+- Electron desktop packaging fully configured
+- GitHub Actions CI/CD pipeline running (3 build runs)
+- Build #3 results: ✅ Linux AppImage, ✅ macOS DMG, ❌ Windows (wrong tsc package)
+- Build #4 in progress with Windows fix
+- Release workflow creates GitHub releases with all platform installers
+- NTFY notifications sent on build status changes
+- All code pushed to testplay-byte/CLINE_AGENT
