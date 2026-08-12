@@ -1,0 +1,199 @@
+# ============================================================
+# ACUTE AGENT — Build Desktop Application
+# Builds Windows, macOS, and Linux installers
+# ============================================================
+
+name: Build Desktop App
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'AGENT-CONTEXT/**'
+      - 'knowledge-base/**'
+      - 'upload/**'
+      - '.gitignore'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version override (e.g. 1.0.1)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  NODE_VERSION: '20'
+  BUN_VERSION: '1.2.2'
+
+jobs:
+  # ============================================================
+  # JOB 1: Build the application
+  # ============================================================
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: ACUTE-AGENT-Windows
+            platform: win
+          - os: macos-latest
+            artifact_name: ACUTE-AGENT-macOS
+            platform: mac
+          - os: ubuntu-latest
+            artifact_name: ACUTE-AGENT-Linux
+            platform: linux
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Generate Prisma Client
+        run: bun run db:generate
+
+      - name: Build Next.js
+        run: bun run build:next
+        env:
+          NODE_ENV: production
+
+      - name: Copy static assets to standalone
+        run: |
+          cp -r .next/static .next/standalone/.next/
+          cp -r public .next/standalone/
+        shell: bash
+
+      - name: Build Electron app (Windows)
+        if: matrix.platform == 'win'
+        run: npx electron-builder --win --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Electron app (macOS)
+        if: matrix.platform == 'mac'
+        run: npx electron-builder --mac --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Electron app (Linux)
+        if: matrix.platform == 'linux'
+        run: npx electron-builder --linux --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: release/
+          if-no-files-found: error
+
+  # ============================================================
+  # JOB 2: Create GitHub Release
+  # ============================================================
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release/
+          merge-multiple: true
+
+      - name: List release files
+        run: ls -la release/
+
+      - name: Generate version string
+        id: version
+        run: |
+          INPUT_VERSION="${{ github.event.inputs.version }}"
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="v$(date +%Y.%m.%d)-$(echo ${{ github.sha }} | cut -c1-7)"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Release version: $VERSION"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: "ACUTE AGENT ${{ steps.version.outputs.version }}"
+          body: |
+            ## ACUTE AGENT Desktop Application
+
+            **Build**: ${{ steps.version.outputs.version }}
+            **Commit**: ${{ github.sha }}
+
+            ### Downloads
+            - **Windows**: `.exe` installer (NSIS)
+            - **macOS**: `.dmg` disk image
+            - **Linux**: `.AppImage` portable
+
+            ### Installation
+            1. Download the installer for your platform
+            2. Run the installer
+            3. Launch ACUTE AGENT from your Start Menu / Applications
+
+            ### Features
+            - Multi-project management
+            - Multi-model AI integration
+            - Beautiful animated UI with customizable themes
+            - Local-first architecture (your data stays on your machine)
+          draft: false
+          prerelease: true
+          files: release/**/*
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============================================================
+  # JOB 3: Send NTFY notification
+  # ============================================================
+  notify:
+    needs: [build, release]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Send build notification
+        if: always()
+        run: |
+          STATUS="${{ needs.build.result }}"
+          if [ "$STATUS" = "success" ]; then
+            EMOJI="✅"
+            MESSAGE="Desktop build completed successfully!"
+          else
+            EMOJI="❌"
+            MESSAGE="Desktop build FAILED: $STATUS"
+          fi
+          
+          # Send via NTFY
+          curl -s -d "${EMOJI} ACUTE AGENT Build: ${MESSAGE}" \
+            -H "Title: ACUTE AGENT CI/CD" \
+            -H "Priority: high" \
+            -H "Tags: acute-agent" \
+            ntfy.sh/cline-agent-chat-808 || true

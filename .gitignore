@@ -20,6 +20,10 @@ node_modules
 # production
 /build
 
+# Electron build output
+/release/
+/dist/electron/
+
 # misc
 .DS_Store
 *.pem
@@ -32,10 +36,10 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
-
 
 # typescript
 *.tsbuildinfo
@@ -46,10 +50,11 @@ local-*
 *.log
 dev.log
 dev.out.log
+server.log
+
 test
 prompt
 
-server.log
 # Skills directory
 /skills/
 
@@ -59,6 +64,31 @@ server.log
 # Knowledge base working files
 /knowledge-base/
 
+# Upload files (user uploaded designs, not part of our app)
+/upload/
+/download/
+
 # GitHub token and credentials
 .env.local
 .env.*.local
+
+# Tool results (temporary analysis files)
+/tool-results/
+
+# Screenshots (temporary)
+screenshot-*.png
+
+# Agent context (working files, already tracked separately)
+# /AGENT-CONTEXT/ — kept for repo visibility
+
+# Database files
+*.db
+*.db-journal
+/db/
+
+# Bun lock file (regenerated on install)
+# bun.lock — keep this, it ensures reproducible builds
+
+# Temp files
+--timeout
+*.tmp
