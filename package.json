@@ -112,33 +112,13 @@
       "buildResources": "electron/resources"
     },
     "files": [
-      "dist/electron/**/*",
-      "public/**/*",
-      ".next/standalone/**/*",
-      ".next/static/**/*",
-      "node_modules/.prisma/**/*",
-      "prisma/**/*"
+      "dist/electron/**/*"
     ],
     "extraResources": [
       {
         "from": ".next/standalone",
-        "to": "standalone"
-      },
-      {
-        "from": ".next/static",
-        "to": "app/.next/static"
-      },
-      {
-        "from": "public",
-        "to": "app/public"
-      },
-      {
-        "from": "node_modules/.prisma",
-        "to": "app/node_modules/.prisma"
-      },
-      {
-        "from": "prisma",
-        "to": "app/prisma"
+        "to": "standalone",
+        "filter": ["**/*", "!node_modules/@prisma/engines/**"]
       }
     ],
     "win": {

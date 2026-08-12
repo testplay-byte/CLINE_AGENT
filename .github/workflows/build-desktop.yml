@@ -80,6 +80,27 @@ jobs:
           cp -r public .next/standalone/
         shell: bash
 
+      - name: Compile Electron TypeScript
+        run: npx tsc -p electron/tsconfig.json
+        shell: bash
+
+      - name: Verify Electron build output
+        run: |
+          echo "Checking compiled Electron files..."
+          ls -la dist/electron/
+          test -f dist/electron/main.js && echo "✅ main.js found" || (echo "❌ main.js NOT found" && exit 1)
+          test -f dist/electron/preload.js && echo "✅ preload.js found" || (echo "❌ preload.js NOT found" && exit 1)
+          test -f dist/electron/ipc-handlers.js && echo "✅ ipc-handlers.js found" || (echo "❌ ipc-handlers.js NOT found" && exit 1)
+        shell: bash
+
+      - name: Copy Prisma schema to standalone
+        run: |
+          mkdir -p .next/standalone/prisma
+          cp prisma/schema.prisma .next/standalone/prisma/
+          mkdir -p .next/standalone/node_modules/.prisma
+          cp -r node_modules/.prisma/* .next/standalone/node_modules/.prisma/ 2>/dev/null || true
+        shell: bash
+
       - name: Build Electron app (Windows)
         if: matrix.platform == 'win'
         run: npx electron-builder --win --publish never

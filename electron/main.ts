@@ -93,20 +93,24 @@ async function startServer(): Promise<number> {
   serverPort = port;
 
   let serverPath: string;
+  let serverCwd: string;
   if (isDev) {
-    // In development, use the dev server
+    // In development, use the Next.js dev command
     serverPath = join(process.cwd(), 'node_modules', '.bin', 'next');
+    serverCwd = process.cwd();
   } else {
     // In production, use the standalone server
-    serverPath = join(process.resourcesPath, 'standalone', 'server.js');
+    // electron-builder puts extraResources in process.resourcesPath
+    const standaloneDir = join(process.resourcesPath, 'standalone');
+    serverPath = join(standaloneDir, 'server.js');
+    serverCwd = standaloneDir;
   }
 
   if (!existsSync(serverPath)) {
     console.error(`Server not found at: ${serverPath}`);
-    // Fallback for packaged app
-    if (!isDev) {
-      serverPath = join(process.resourcesPath, 'app', '.next', 'standalone', 'server.js');
-    }
+    console.error(`resourcesPath: ${process.resourcesPath}`);
+    console.error(`cwd: ${process.cwd()}`);
+    throw new Error(`Next.js server.js not found at ${serverPath}`);
   }
 
   const serverArgs = isDev
@@ -115,9 +119,10 @@ async function startServer(): Promise<number> {
 
   console.log(`Starting server on port ${port}...`);
   console.log(`Server path: ${serverPath}`);
+  console.log(`Server cwd: ${serverCwd}`);
 
   serverProcess = spawn(process.execPath, [serverPath, ...serverArgs], {
-    cwd: isDev ? process.cwd() : join(process.resourcesPath, 'app'),
+    cwd: serverCwd,
     env: {
       ...process.env,
       NODE_ENV: isDev ? 'development' : 'production',
@@ -166,7 +171,7 @@ function createWindow(port: number) {
     minWidth: 900,
     minHeight: 600,
     title: 'ACUTE AGENT',
-    icon: join(__dirname, '..', 'public', 'logo.svg'),
+    icon: join(__dirname, '..', 'resources', 'icon.png'),
     backgroundColor: '#FFFBF0',
     show: false, // Show after ready-to-show to avoid flash
     autoHideMenuBar: true,
