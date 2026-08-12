@@ -147,6 +147,17 @@ jobs:
       - name: List release files
         run: ls -la release/
 
+      - name: Filter installer files only
+        run: |
+          mkdir -p release/installers
+          cp release/*Setup*.exe release/installers/ 2>/dev/null || true
+          cp release/*.dmg release/installers/ 2>/dev/null || true
+          cp release/*.AppImage release/installers/ 2>/dev/null || true
+          cp release/*.blockmap release/installers/ 2>/dev/null || true
+          cp release/latest*.yml release/installers/ 2>/dev/null || true
+          echo "Installer files:"
+          ls -la release/installers/
+
       - name: Generate version string
         id: version
         run: |
@@ -187,7 +198,7 @@ jobs:
             - Local-first architecture (your data stays on your machine)
           draft: false
           prerelease: true
-          files: release/**/*
+          files: release/installers/**/*
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
