@@ -24,10 +24,12 @@ export function registerIpcHandlers(mainWindow: BrowserWindow | null): void {
   });
 
   ipcMain.handle('window-maximize', () => {
-    if (mainWindow?.isMaximized()) {
-      mainWindow.unmaximize();
-    } else {
-      mainWindow.maximize();
+    if (mainWindow) {
+      if (mainWindow.isMaximized()) {
+        mainWindow.unmaximize();
+      } else {
+        mainWindow.maximize();
+      }
     }
   });
 
@@ -37,6 +39,10 @@ export function registerIpcHandlers(mainWindow: BrowserWindow | null): void {
 
   ipcMain.handle('window-close', () => {
     mainWindow?.close();
+  });
+
+  ipcMain.handle('reload-window', () => {
+    mainWindow?.reload();
   });
 
   // ============================================================
