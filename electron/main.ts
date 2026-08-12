@@ -57,7 +57,6 @@ function waitForServer(port: number, maxAttempts = 60, interval = 1000): Promise
   return new Promise((resolve, reject) => {
     let attempts = 0;
     const check = () => {
-      const req = net.request ? undefined : undefined;
       // Simple TCP check
       const socket = net.createConnection({ port, host: '127.0.0.1' }, () => {
         socket.destroy();
