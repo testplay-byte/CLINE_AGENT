@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  output: "standalone",
+  // Static export — produces HTML/CSS/JS only, no Node.js server needed
+  // This is critical for keeping the Electron app size small (~60-80MB vs 500MB+)
+  output: "export",
 
   // Disable server images in Electron (file system works differently)
   images: {
@@ -25,7 +27,6 @@ const nextConfig: NextConfig = {
     optimizePackageImports: [
       'lucide-react',
       'framer-motion',
-      'recharts',
       'date-fns',
     ],
   },

@@ -1,6 +1,7 @@
 # ============================================================
 # ACUTE AGENT — Build Desktop Application
-# Builds Windows, macOS, and Linux installers
+# Uses static export (no embedded Node.js server)
+# Produces lightweight installers (~60-80MB vs 500MB+)
 # ============================================================
 
 name: Build Desktop App
@@ -66,18 +67,18 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Generate Prisma Client
-        run: bun run db:generate
-
-      - name: Build Next.js
+      - name: Build Next.js (static export)
         run: bun run build:next
         env:
           NODE_ENV: production
 
-      - name: Copy static assets to standalone
+      - name: Verify static export output
         run: |
-          cp -r .next/static .next/standalone/.next/
-          cp -r public .next/standalone/
+          echo "Checking static export output..."
+          ls -la out/
+          test -f out/index.html && echo "✅ index.html found" || (echo "❌ index.html NOT found" && exit 1)
+          echo "Static export size:"
+          du -sh out/
         shell: bash
 
       - name: Compile Electron TypeScript
@@ -91,14 +92,6 @@ jobs:
           test -f dist/electron/main.js && echo "✅ main.js found" || (echo "❌ main.js NOT found" && exit 1)
           test -f dist/electron/preload.js && echo "✅ preload.js found" || (echo "❌ preload.js NOT found" && exit 1)
           test -f dist/electron/ipc-handlers.js && echo "✅ ipc-handlers.js found" || (echo "❌ ipc-handlers.js NOT found" && exit 1)
-        shell: bash
-
-      - name: Copy Prisma schema to standalone
-        run: |
-          mkdir -p .next/standalone/prisma
-          cp prisma/schema.prisma .next/standalone/prisma/
-          mkdir -p .next/standalone/node_modules/.prisma
-          cp -r node_modules/.prisma/* .next/standalone/node_modules/.prisma/ 2>/dev/null || true
         shell: bash
 
       - name: Build Electron app (Windows)
@@ -150,13 +143,21 @@ jobs:
       - name: Filter installer files only
         run: |
           mkdir -p release/installers
+          # Windows: NSIS installer + Portable
           cp release/*Setup*.exe release/installers/ 2>/dev/null || true
+          cp release/*Portable*.exe release/installers/ 2>/dev/null || true
+          # macOS: DMG
           cp release/*.dmg release/installers/ 2>/dev/null || true
+          # Linux: AppImage
           cp release/*.AppImage release/installers/ 2>/dev/null || true
+          # Metadata
           cp release/*.blockmap release/installers/ 2>/dev/null || true
           cp release/latest*.yml release/installers/ 2>/dev/null || true
           echo "Installer files:"
           ls -la release/installers/
+          echo ""
+          echo "File sizes:"
+          du -sh release/installers/* 2>/dev/null || true
 
       - name: Generate version string
         id: version
@@ -182,20 +183,28 @@ jobs:
             **Commit**: ${{ github.sha }}
 
             ### Downloads
-            - **Windows**: `.exe` installer (NSIS)
+            - **Windows Installer**: `.exe` (NSIS installer — recommended)
+            - **Windows Portable**: `.exe` (single file, no install needed)
             - **macOS**: `.dmg` disk image
             - **Linux**: `.AppImage` portable
 
             ### Installation
             1. Download the installer for your platform
-            2. Run the installer
-            3. Launch ACUTE AGENT from your Start Menu / Applications
+            2. **Windows**: Run the `.exe` installer OR use the portable `.exe`
+            3. **macOS**: Open the `.dmg` and drag to Applications
+            4. **Linux**: Make the `.AppImage` executable and run
+
+            ### Upgrading
+            - **Windows**: Run the new installer — it will replace the old version automatically
+            - **Portable**: Simply download the new portable `.exe` and delete the old one
+            - **macOS/Linux**: Replace the old file with the new one
 
             ### Features
             - Multi-project management
             - Multi-model AI integration
             - Beautiful animated UI with customizable themes
             - Local-first architecture (your data stays on your machine)
+            - Lightweight static build (~60-80MB)
           draft: false
           prerelease: true
           files: release/installers/**/*

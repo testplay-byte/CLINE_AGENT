@@ -1,170 +1,76 @@
 // ============================================================
 // ACUTE AGENT — Electron Main Process
-// Starts the Next.js standalone server and creates the main window
+// Loads the static Next.js export directly (no server needed)
+// Uses a custom protocol to serve static files in production
 // ============================================================
 
-import { app, BrowserWindow, shell } from 'electron';
+import { app, BrowserWindow, shell, protocol, net } from 'electron';
 import { join } from 'path';
-import { spawn, ChildProcess } from 'child_process';
-import { existsSync } from 'fs';
-import net from 'net';
+import { pathToFileURL } from 'url';
 import { registerIpcHandlers } from './ipc-handlers';
 
 // ============================================================
 // TYPES & CONFIG
 // ============================================================
 let mainWindow: BrowserWindow | null = null;
-let serverProcess: ChildProcess | null = null;
-let serverPort = 3000;
-let isDev = !app.isPackaged;
-
-// In packaged mode, use embedded resources
-if (app.isPackaged) {
-  // Check if running from asar archive
-  const resourcesPath = process.resourcesPath;
-  console.log(`Running from: ${resourcesPath}`);
-}
-
-// Try multiple ports if default is taken
-const PORTS_TO_TRY = [3000, 3001, 3002, 3003, 3004, 3005];
+const isDev = !app.isPackaged;
 
 // ============================================================
-// UTILITY: Find free port
+// SINGLE INSTANCE LOCK — prevents window replication bug
+// Without this, launching the app multiple times creates
+// multiple windows and server processes
 // ============================================================
-function findFreePort(startPort: number): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const tryPort = (port: number) => {
-      const server = net.createServer();
-      server.listen(port, () => {
-        server.close(() => resolve(port));
-      });
-      server.on('error', () => {
-        if (port < startPort + PORTS_TO_TRY.length) {
-          tryPort(port + 1);
-        } else {
-          reject(new Error(`No free port found between ${startPort} and ${startPort + PORTS_TO_TRY.length}`));
-        }
-      });
-    };
-    tryPort(startPort);
+const gotTheLock = app.requestSingleInstanceLock();
+
+if (!gotTheLock) {
+  // Another instance is already running — quit immediately
+  app.quit();
+} else {
+  // If a second instance is launched, focus the existing window
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) {
+        mainWindow.restore();
+      }
+      mainWindow.focus();
+    }
   });
 }
 
 // ============================================================
-// UTILITY: Wait for server to be ready
+// CUSTOM PROTOCOL — serves static files from the export directory
+// This avoids the need for an embedded HTTP server, which was
+// the primary cause of the 500MB+ build size
 // ============================================================
-function waitForServer(port: number, maxAttempts = 60, interval = 1000): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let attempts = 0;
-    const check = () => {
-      // Simple TCP check
-      const socket = net.createConnection({ port, host: '127.0.0.1' }, () => {
-        socket.destroy();
-        resolve();
-      });
-      socket.on('error', () => {
-        attempts++;
-        if (attempts >= maxAttempts) {
-          reject(new Error(`Server did not start on port ${port} after ${maxAttempts * interval}ms`));
-        } else {
-          setTimeout(check, interval);
-        }
-      });
-      socket.setTimeout(interval);
-      socket.on('timeout', () => {
-        socket.destroy();
-        attempts++;
-        if (attempts >= maxAttempts) {
-          reject(new Error(`Server did not start on port ${port} after ${maxAttempts * interval}ms`));
-        } else {
-          setTimeout(check, interval);
-        }
-      });
-    };
-    check();
-  });
-}
-
-// ============================================================
-// START NEXT.JS SERVER
-// ============================================================
-async function startServer(): Promise<number> {
-  const port = await findFreePort(3000);
-  serverPort = port;
-
-  let serverPath: string;
-  let serverCwd: string;
-  if (isDev) {
-    // In development, use the Next.js dev command
-    serverPath = join(process.cwd(), 'node_modules', '.bin', 'next');
-    serverCwd = process.cwd();
-  } else {
-    // In production, use the standalone server
-    // electron-builder puts extraResources in process.resourcesPath
-    const standaloneDir = join(process.resourcesPath, 'standalone');
-    serverPath = join(standaloneDir, 'server.js');
-    serverCwd = standaloneDir;
-  }
-
-  if (!existsSync(serverPath)) {
-    console.error(`Server not found at: ${serverPath}`);
-    console.error(`resourcesPath: ${process.resourcesPath}`);
-    console.error(`cwd: ${process.cwd()}`);
-    throw new Error(`Next.js server.js not found at ${serverPath}`);
-  }
-
-  const serverArgs = isDev
-    ? ['dev', '-p', String(port)]
-    : [];
-
-  console.log(`Starting server on port ${port}...`);
-  console.log(`Server path: ${serverPath}`);
-  console.log(`Server cwd: ${serverCwd}`);
-
-  serverProcess = spawn(process.execPath, [serverPath, ...serverArgs], {
-    cwd: serverCwd,
-    env: {
-      ...process.env,
-      NODE_ENV: isDev ? 'development' : 'production',
-      PORT: String(port),
-      ELECTRON: '1',
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'app',
+    privileges: {
+      secure: true,
+      standard: true,
+      supportFetchAPI: true,
+      stream: true,
+      corsEnabled: true,
     },
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  },
+]);
 
-  serverProcess.stdout?.on('data', (data: Buffer) => {
-    console.log(`[Next.js] ${data.toString().trim()}`);
-  });
-
-  serverProcess.stderr?.on('data', (data: Buffer) => {
-    console.error(`[Next.js Error] ${data.toString().trim()}`);
-  });
-
-  serverProcess.on('error', (err) => {
-    console.error('Failed to start server:', err);
-  });
-
-  serverProcess.on('close', (code) => {
-    console.log(`Server exited with code ${code}`);
-    serverProcess = null;
-  });
-
-  // Wait for the server to be ready
-  try {
-    await waitForServer(port, 120, 1000);
-    console.log(`Server is ready on port ${port}`);
-  } catch (err) {
-    console.error('Server failed to start:', err);
-    throw err;
+// ============================================================
+// UTILITY: Get the static export directory
+// ============================================================
+function getOutDir(): string {
+  if (isDev) {
+    // In dev mode, Next.js static export goes to project root /out
+    return join(process.cwd(), 'out');
   }
-
-  return port;
+  // In production, files are in resources/out (from extraResources)
+  return join(process.resourcesPath, 'out');
 }
 
 // ============================================================
-// CREATE MAIN WINDOW
+// CREATE MAIN WINDOW (returns the created window)
 // ============================================================
-function createWindow(port: number) {
+function createWindow(): BrowserWindow {
   const iconPath = isDev
     ? join(process.cwd(), 'electron', 'resources', 'icon.png')
     : join(process.resourcesPath, 'icon.png');
@@ -190,13 +96,6 @@ function createWindow(port: number) {
     },
   });
 
-  // Load the app
-  const url = isDev
-    ? `http://localhost:${port}`
-    : `http://localhost:${port}`;
-
-  mainWindow.loadURL(url);
-
   // Register IPC handlers
   registerIpcHandlers(mainWindow);
 
@@ -218,14 +117,7 @@ function createWindow(port: number) {
     mainWindow = null;
   });
 
-  // Prevent navigation away from the app
-  mainWindow.webContents.on('will-navigate', (event, navigationUrl) => {
-    const parsedUrl = new URL(navigationUrl);
-    if (parsedUrl.origin !== `http://localhost:${port}`) {
-      event.preventDefault();
-      shell.openExternal(navigationUrl);
-    }
-  });
+  return mainWindow;
 }
 
 // ============================================================
@@ -233,8 +125,32 @@ function createWindow(port: number) {
 // ============================================================
 app.whenReady().then(async () => {
   try {
-    const port = await startServer();
-    createWindow(port);
+    if (isDev) {
+      // Development: serve from Next.js dev server (hot reload support)
+      const win = createWindow();
+      win.loadURL('http://localhost:3000');
+    } else {
+      // Production: serve static files via custom protocol (no server needed)
+      const outDir = getOutDir();
+
+      // Register protocol handler to serve static export files
+      await protocol.handle('app', (request) => {
+        const requestUrl = new URL(request.url);
+        // Remove leading slash from pathname
+        const relativePath = requestUrl.pathname.replace(/^\//, '') || 'index.html';
+        const fullPath = join(outDir, relativePath);
+
+        try {
+          return net.fetch(pathToFileURL(fullPath).toString());
+        } catch {
+          // Return 404 for missing files
+          return new Response('Not Found', { status: 404 });
+        }
+      });
+
+      const win = createWindow();
+      win.loadURL('app://localhost/index.html');
+    }
   } catch (err) {
     console.error('Failed to start application:', err);
     app.quit();
@@ -248,22 +164,10 @@ app.on('window-all-closed', () => {
   }
 });
 
-app.on('activate', async () => {
-  if (mainWindow === null) {
-    try {
-      const port = serverProcess ? serverPort : await startServer();
-      createWindow(port);
-    } catch (err) {
-      console.error('Failed to reactivate application:', err);
-    }
-  }
-});
-
-// Clean up on quit
-app.on('before-quit', () => {
-  if (serverProcess) {
-    serverProcess.kill('SIGTERM');
-    serverProcess = null;
+app.on('activate', () => {
+  if (!mainWindow) {
+    const win = createWindow();
+    win.loadURL(isDev ? 'http://localhost:3000' : 'app://localhost/index.html');
   }
 });
 
