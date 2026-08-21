@@ -1,0 +1,32 @@
+# Dependencies & build output
+node_modules/
+dist/
+build/
+target/
+coverage/
+
+# Build info & logs
+*.tsbuildinfo
+*.log
+
+# Environment & local config
+.env
+.env.*
+*.local
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Kilo manager state & worktrees
+.kilo/agent-manager.json
+.kilo/worktrees/
+
+# External reference clones (never committed; live outside this repo)
+_references/
+
+# OS & editor noise
+Thumbs.db
+.DS_Store
+.vscode/
