@@ -25,6 +25,6 @@ Adopt **UI-BRIEF as the design source of truth**, implemented as CSS variables i
 
 ## Consequences
 
-- `[ASSUMPTION]` Ownership/license of the bundle code is to be confirmed by the owner — non-blocking; treated as owner-provided proprietary material until confirmed.
+- Owner confirmed 2026-08-22: bundles are his own original design language. Direction: follow the design language faithfully; components are re-implemented on our stack, never copied verbatim (owner instruction + framework mismatch).
 - Tailwind v4 idioms must be translated to v3 CSS variables during re-implementation (extra care, no copy-paste).
 - Freeform window mode is explicitly deferred and must not leak into v1 scope.

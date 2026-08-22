@@ -1,9 +1,9 @@
-# ACUTE-CODE - Master Specification
+﻿# ACUTE-CODE - Master Specification
 
 | Field | Value |
 | --- | --- |
 | Product | ACUTE-CODE - closed-source, local-first multi-agent engineering workbench |
-| Version | Draft v0.1 (Phase 0) |
+| Version | v1.1 (owner amendments 2026-08-22: first-run onboarding in scope; dev-phase credential file per ADR-0011) |
 | Status | Pending owner approval |
 | Platform | Windows 10/11 x64 desktop |
 | Related ADRs | ADR-0003 (live-test provider priority), ADR-0005 (skills scope), ADR-0006 (vision routing / local inference deferral) |
@@ -181,6 +181,17 @@ The product surface is deliberately small; every feature must fit one of these s
 - **FR-1201** API keys are stored only in Windows Credential Manager (DPAPI-backed storage).
 - **FR-1202** Keys never appear in logs, the repository, transcripts, or error messages; redaction applies at serialization boundaries.
 - **FR-1203** The UI displays keys masked by default with an explicit reveal action.
+
+### FR-13xx - First-run Onboarding (owner amendment 2026-08-22)
+
+The first-run Setup screen runs once before the main UI when nothing is configured yet; it is re-runnable later from Settings (ADR-0012).
+
+- **FR-1301** The Setup screen appears exactly when no provider is configured.
+- **FR-1302** Theme/accent selection is offered during Setup and persisted like FR-1108.
+- **FR-1303** Provider connect supports the OpenRouter preset and custom OpenAI-compatible endpoints (name + base URL).
+- **FR-1304** API keys entered during Setup are stored per ADR-0011 (dev-phase `secrets.local.md`, gitignored) with Windows Credential Manager fallback per FR-12xx.
+- **FR-1305** Test Connection validates the endpoint/key and lists available models fetched from the base URL; the OpenRouter preset targets `https://openrouter.ai/api/v1`.
+- **FR-1306** Completing Setup sets the `onboardingComplete` flag; the flow is re-runnable from Settings.
 
 ## 5. Non-Functional Requirements
 

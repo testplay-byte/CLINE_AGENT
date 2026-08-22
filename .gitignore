@@ -30,3 +30,5 @@ _references/
 Thumbs.db
 .DS_Store
 .vscode/
+# Local secrets (never committed; see ADR-0011)
+secrets.local.md

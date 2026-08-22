@@ -1,4 +1,4 @@
-# AGENTS.md — ACUTE-CODE Operating Contract
+﻿# AGENTS.md — ACUTE-CODE Operating Contract
 
 This document binds any AI session — interactive or sub-agent dispatched — working in this repository. Read it fully before doing anything else.
 
@@ -63,4 +63,8 @@ The orchestrating session MUST self-test each phase itself — execute the check
 
 ## (f) Current phase status
 
-**Phase 0 — Discovery & Spec — IN PROGRESS** (9 research memos + SPEC draft underway; QA + commit pending — see `docs/runbooks/plan-phase-0.md`).
+**Phase 2 (Core skeleton) in progress — Phase 1 CI pending push after PAT fix** (see `docs/runbooks/plan-phase-2.md`).
+
+## (g) Communication
+
+Owner notifications are sent via ntfy.sh topic `TASKISDONE`; every message body MUST start with the prefix 🍁🍁🍁🍁🍁🍁 followed by a short title line. Send on: phase milestones, CI results, blockers, first-runnable-test announcements.

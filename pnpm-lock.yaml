@@ -11,6 +11,12 @@ importers:
       '@acute/shared':
         specifier: workspace:*
         version: link:shared
+      '@fontsource-variable/space-grotesk':
+        specifier: ^5.2.5
+        version: 5.3.0
+      '@fontsource/geist-mono':
+        specifier: ^5.2.5
+        version: 5.3.0
       '@tanstack/react-query':
         specifier: ^5.51.23
         version: 5.101.4(react@18.3.1)
@@ -602,6 +608,12 @@ packages:
 
   '@fastify/websocket@8.3.1':
     resolution: {integrity: sha512-hsQYHHJme/kvP3ZS4v/WMUznPBVeeQHHwAoMy1LiN6m/HuPfbdXq1MBJ4Nt8qX1YI+eVbog4MnOsU7MTozkwYA==}
+
+  '@fontsource-variable/space-grotesk@5.3.0':
+    resolution: {integrity: sha512-2IxmvfB08i9vnGB3Ym/AXvhRE+8XOjWMXIyDum03c+tPwH0FUoMNQfGpU8NXPxjbws0Vvss3AH0Zqt4oJBBAdw==}
+
+  '@fontsource/geist-mono@5.3.0':
+    resolution: {integrity: sha512-UtJ1BBBCVpMYdIcW7nEB45UAoAw5M53ZXs2t0ciPW+IokuAAIc56M8+kW5tXbRJCTpDw4XTtU7proT6NdQAHTg==}
 
   '@humanfs/core@0.19.2':
     resolution: {integrity: sha512-UhXNm+CFMWcbChXywFwkmhqjs3PRCmcSa/hfBgLIb7oQ5HNb1wS0icWsGtSAUNgefHeI+eBrA8I1fxmbHsGdvA==}
@@ -2730,6 +2742,10 @@ snapshots:
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
+
+  '@fontsource-variable/space-grotesk@5.3.0': {}
+
+  '@fontsource/geist-mono@5.3.0': {}
 
   '@humanfs/core@0.19.2':
     dependencies:
