@@ -16,7 +16,7 @@ Every requirement carries an ID (`FR-xxx` functional, `NFR-xxx` non-functional).
 
 **Local-first (owner-confirmed):** all processing, storage, and orchestration run on-device. LLM inference goes through cloud APIs the user configures. No local model execution ships in v1.
 
-**Status:** Draft v0.1 (Phase 0), pending owner approval.
+**Status:** APPROVED v1.0 - owner approval 2026-08-22. Phase 0 exit granted.
 
 ### Terminology
 - **Orchestrator** - cheap/fast planning agent that never edits files directly.

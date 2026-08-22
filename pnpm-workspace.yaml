@@ -1,0 +1,7 @@
+allowBuilds:
+  better-sqlite3: true
+  esbuild: false
+
+packages:
+  - shared
+  - agent-core
